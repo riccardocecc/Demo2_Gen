@@ -4,8 +4,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import StateGraph, END
 from langchain_core.tools import tool
 import pandas as pd
-import plotly.graph_objects as go
-import plotly.express as px
+import numpy as np
 from datetime import datetime, timedelta
 import json
 import re
@@ -48,10 +47,12 @@ class ErrorResult(TypedDict):
 SLEEP_DATA_PATH = 'sleep_data.csv'
 
 # ==================== NODE 1: DATA EXTRACTION ====================
+# ==================== NODE 1: DATA EXTRACTION ====================
 def extract_sleep_data_node(state: SleepAnalysisState, llm: ChatGoogleGenerativeAI) -> SleepAnalysisState:
     """
     Nodo 1: Estrae i dati dal CSV usando la query in linguaggio naturale.
     Utilizza l'LLM con il tool get_sleep_data per estrarre e recuperare i dati.
+    Pulisce i dati usando pandas e numpy.
     """
     print("\n[NODE 1] Estrazione dati dal CSV...")
 
@@ -91,7 +92,7 @@ def extract_sleep_data_node(state: SleepAnalysisState, llm: ChatGoogleGenerative
             subject_id = tool_call['args'].get('subject_id', 1)
             period = tool_call['args'].get('period', 'last_30_days')
 
-            print(f" soggetto ID: {subject_id}, period: {period}")
+            print(f"✓ Estratti parametri - soggetto ID: {subject_id}, period: {period}")
 
             # Chiama il tool effettivamente
             result = get_sleep_data.invoke({
@@ -104,19 +105,91 @@ def extract_sleep_data_node(state: SleepAnalysisState, llm: ChatGoogleGenerative
                 state["error"] = result['error']
                 return state
 
+            # ===== PULIZIA DATI CON PANDAS E NUMPY =====
+            df = pd.DataFrame(result['records'])
+
+            print(f"✓ Dati estratti: {len(df)} record")
+            print(f"  Pulizia dati in corso...")
+
+            # 1. Converti la colonna data in datetime
+            df['data'] = pd.to_datetime(df['data'], errors='coerce')
+
+            # 2. Identifica colonne numeriche (escludi data e subject_id)
+            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+            if 'subject_id' in numeric_cols:
+                numeric_cols.remove('subject_id')
+
+            # 3. Gestisci valori mancanti nelle colonne numeriche (CORRETTO)
+            for col in numeric_cols:
+                # Sostituisci valori negativi con NaN
+                df.loc[df[col] < 0, col] = np.nan
+
+                # Sostituisci infiniti con NaN (SENZA inplace)
+                df[col] = df[col].replace([np.inf, -np.inf], np.nan)
+
+            # 4. Rimuovi righe con data mancante
+            initial_rows = len(df)
+            df = df.dropna(subset=['data'])
+
+            if len(df) < initial_rows:
+                print(f"  ⚠️ Rimosse {initial_rows - len(df)} righe con date mancanti")
+
+            # 5. Rimuovi duplicati basati su data e subject_id
+            initial_rows = len(df)
+            df = df.drop_duplicates(subset=['data', 'subject_id'], keep='first')
+
+            if len(df) < initial_rows:
+                print(f"  ⚠️ Rimosse {initial_rows - len(df)} righe duplicate")
+
+            # 6. Ordina per data
+            df = df.sort_values('data').reset_index(drop=True)
+
+            # 7. Gestisci outliers usando IQR
+            outlier_cols = ['total_sleep_time', 'hr_average', 'rr_average', 'wakeup_count']
+            for col in outlier_cols:
+                if col in df.columns:
+                    Q1 = df[col].quantile(0.25)
+                    Q3 = df[col].quantile(0.75)
+                    IQR = Q3 - Q1
+                    lower_bound = Q1 - 3 * IQR
+                    upper_bound = Q3 + 3 * IQR
+
+                    outliers = ((df[col] < lower_bound) | (df[col] > upper_bound)).sum()
+                    if outliers > 0:
+                        print(f"  ⚠️ Rilevati {outliers} outliers in '{col}' (impostati a NaN)")
+                        df.loc[(df[col] < lower_bound) | (df[col] > upper_bound), col] = np.nan
+
+            # 8. Report finale sulla pulizia
+            missing_summary = df[numeric_cols].isnull().sum()
+            if missing_summary.sum() > 0:
+                print(f"  ℹ️ Valori mancanti dopo pulizia:")
+                for col, count in missing_summary.items():
+                    if count > 0:
+                        print(f"    - {col}: {count} ({count / len(df) * 100:.1f}%)")
+
+            print(f"✓ Pulizia completata: {len(df)} record validi")
+
+            # CONVERTI DATETIME IN STRING PRIMA DI SALVARE
+            df['data'] = df['data'].dt.strftime('%Y-%m-%d')
+
+            # Riconverti in dizionario per salvare nello state
+            cleaned_records = df.to_dict('records')
+            result['records'] = cleaned_records
+            # ============================================
+
             # Salva i dati nello state
             state["subject_id"] = subject_id
             state["period"] = period
             state["raw_data"] = result
 
-            print(f"✓ Estratti {len(result['records'])} record per soggetto {subject_id}")
+            print(f"✓ Dati pronti per l'analisi: {len(result['records'])} record puliti")
 
         else:
             # Fallback: estrai parametri manualmente usando regex
             print("⚠️ LLM non ha chiamato il tool, uso fallback con regex...")
 
-            subject_id = 1  # default
-            period = "last_30_days"  # default
+            subject_id = 1
+            period = "last_30_days"
 
             # Cerca subject_id nella query
             subject_match = re.search(r'soggetto[:\s]+(\d+)|subject[:\s]+(\d+)|id[:\s]+(\d+)', query, re.IGNORECASE)
@@ -144,20 +217,78 @@ def extract_sleep_data_node(state: SleepAnalysisState, llm: ChatGoogleGenerative
                 state["error"] = result['error']
                 return state
 
+            # ===== PULIZIA DATI (stesso codice di sopra) =====
+            df = pd.DataFrame(result['records'])
+
+            print(f"✓ Dati estratti: {len(df)} record")
+            print(f"  Pulizia dati in corso...")
+
+            df['data'] = pd.to_datetime(df['data'], errors='coerce')
+
+            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+            if 'subject_id' in numeric_cols:
+                numeric_cols.remove('subject_id')
+
+            for col in numeric_cols:
+                df.loc[df[col] < 0, col] = np.nan
+                df[col] = df[col].replace([np.inf, -np.inf], np.nan)
+
+            initial_rows = len(df)
+            df = df.dropna(subset=['data'])
+
+            if len(df) < initial_rows:
+                print(f"  ⚠️ Rimosse {initial_rows - len(df)} righe con date mancanti")
+
+            initial_rows = len(df)
+            df = df.drop_duplicates(subset=['data', 'subject_id'], keep='first')
+
+            if len(df) < initial_rows:
+                print(f"  ⚠️ Rimosse {initial_rows - len(df)} righe duplicate")
+
+            df = df.sort_values('data').reset_index(drop=True)
+
+            outlier_cols = ['total_sleep_time', 'hr_average', 'rr_average', 'wakeup_count']
+            for col in outlier_cols:
+                if col in df.columns:
+                    Q1 = df[col].quantile(0.25)
+                    Q3 = df[col].quantile(0.75)
+                    IQR = Q3 - Q1
+                    lower_bound = Q1 - 3 * IQR
+                    upper_bound = Q3 + 3 * IQR
+
+                    outliers = ((df[col] < lower_bound) | (df[col] > upper_bound)).sum()
+                    if outliers > 0:
+                        print(f"  ⚠️ Rilevati {outliers} outliers in '{col}' (impostati a NaN)")
+                        df.loc[(df[col] < lower_bound) | (df[col] > upper_bound), col] = np.nan
+
+            missing_summary = df[numeric_cols].isnull().sum()
+            if missing_summary.sum() > 0:
+                print(f"  ℹ️ Valori mancanti dopo pulizia:")
+                for col, count in missing_summary.items():
+                    if count > 0:
+                        print(f"    - {col}: {count} ({count / len(df) * 100:.1f}%)")
+
+            print(f"✓ Pulizia completata: {len(df)} record validi")
+
+            # CONVERTI DATETIME IN STRING PRIMA DI SALVARE
+            df['data'] = df['data'].dt.strftime('%Y-%m-%d')
+
+            cleaned_records = df.to_dict('records')
+            result['records'] = cleaned_records
+            # ============================================
+
             state["subject_id"] = subject_id
             state["period"] = period
             state["raw_data"] = result
 
-            print(f"✓ Estratti {len(result['records'])} record per soggetto {subject_id}")
+            print(f"✓ Dati pronti per l'analisi: {len(result['records'])} record puliti")
 
     except Exception as e:
         state["error"] = f"Errore nell'estrazione dati: {str(e)}"
         import traceback
-        print(f"Traceback: {traceback.format_exc()}")
+        print(f"❌ Traceback: {traceback.format_exc()}")
 
     return state
-
-
 # ==================== NODE 1.5: STATISTICAL METHOD SELECTION ====================
 def select_statistical_method_node(state: SleepAnalysisState, llm: ChatGoogleGenerativeAI) -> SleepAnalysisState:
     """
@@ -172,7 +303,7 @@ def select_statistical_method_node(state: SleepAnalysisState, llm: ChatGoogleGen
 
     query = state["query"]
     raw_data = state["raw_data"]
-
+    print("Numero di record disponibili:", {len(raw_data['records'])})
     selection_prompt = f"""
 Sei un esperto statistico specializzato nell'analisi dei dati del sonno.
 
@@ -300,12 +431,13 @@ Rispondi SOLO con il JSON, senza markdown o spiegazioni aggiuntive.
 
 
 # ==================== NODE 2: STATISTICAL ANALYSIS ====================
+# ==================== NODE 2: STATISTICAL ANALYSIS ====================
 def statistical_analysis_node(state: SleepAnalysisState, llm: ChatGoogleGenerativeAI) -> SleepAnalysisState:
     """
     Nodo 2: Genera ed esegue codice Python per analisi statistica
-    basata RIGOROSAMENTE sul metodo statistico selezionato nel nodo precedente.
+    usando ESCLUSIVAMENTE statsmodels.
     """
-    print("\n[NODE 2] Analisi statistica...")
+    print("\n[NODE 2] Analisi statistica con statsmodels...")
 
     if state.get("error"):
         return state
@@ -316,7 +448,7 @@ def statistical_analysis_node(state: SleepAnalysisState, llm: ChatGoogleGenerati
 
     # Crea prompt per generare codice di analisi
     analysis_prompt = f"""
-Sei un esperto di analisi statistica dei dati del sonno.
+Sei un esperto di analisi statistica dei dati del sonno che usa ESCLUSIVAMENTE la libreria statsmodels.
 
 Query originale: "{query}"
 
@@ -343,31 +475,62 @@ Dati disponibili (campi nel DataFrame):
 
 Numero di record: {len(raw_data['records'])}
 
-ISTRUZIONI CRITICHE:
+REQUISITI CRITICI:
 
-1. Implementa ESATTAMENTE l'analisi specificata nel metodo statistico selezionato
-2. Usa SOLO le variabili indicate in 'variables'
-3. Calcola TUTTI i valori richiesti in 'calculations_needed' e 'expected_outputs'
-4. Il dizionario 'results' deve contenere TUTTE le metriche specificate
+1. USA ESCLUSIVAMENTE statsmodels per TUTTE le analisi statistiche
+2. NON usare scipy.stats, sklearn, o altre librerie statistiche
+3. Implementa ESATTAMENTE l'analisi specificata nel metodo statistico selezionato
+4. Usa SOLO le variabili indicate in 'variables'
 
-REQUISITI DEL CODICE:
-- Assumi che i dati siano in 'df' (DataFrame pandas)
-- Importa solo librerie necessarie: numpy, scipy.stats
-- NON stampare nulla TRANNE l'ultima riga che deve essere: print(json.dumps(results, default=str))
+LIBRERIE DISPONIBILI:
+- pandas (pd) - manipolazione dati
+- numpy (np) - operazioni numeriche
+- statsmodels.api (sm) - TUTTE le analisi statistiche
+- statsmodels.formula.api (smf) - formule R-style
+- statsmodels.stats - test statistici
+- statsmodels.tsa - analisi serie temporali
+
+ESEMPI DI UTILIZZO STATSMODELS:
+
+# Correlazione
+import statsmodels.api as sm
+model = sm.OLS(y, sm.add_constant(X)).fit()
+r_squared = model.rsquared
+p_value = model.pvalues[1]
+
+# Regressione lineare
+import statsmodels.formula.api as smf
+model = smf.ols('y ~ x', data=df).fit()
+
+# Test statistici
+from statsmodels.stats.diagnostic import het_breuschpagan
+from statsmodels.stats.stattools import durbin_watson
+
+# Serie temporali
+from statsmodels.tsa.seasonal import seasonal_decompose
+from statsmodels.tsa.stattools import adfuller
+
+# ANOVA
+from statsmodels.formula.api import ols
+from statsmodels.stats.anova import anova_lm
+
+ISTRUZIONI CODICE:
+- Assumi che i dati siano in 'df' (DataFrame pandas già pulito)
+- Importa: pandas (pd), numpy (np), statsmodels (varie componenti)
+- NON stampare nulla TRANNE l'ultima riga: print(json.dumps(results, default=str))
 - Salva TUTTI i risultati nel dizionario 'results'
-- Gestisci NaN e valori mancanti
+- Gestisci NaN con dropna() prima delle analisi
 - Converti date in string se necessario per serializzazione
-- Assicurati che 'results' contenga TUTTE le metriche richieste
-- Alla fine del codice, DEVI stampare results serializzato in JSON con: print(json.dumps(results, default=str))
+- L'ULTIMA RIGA del codice DEVE essere: print(json.dumps(results, default=str))
 
-IMPORTANTE: Il codice deve essere COERENTE con il metodo selezionato.
-Se il metodo richiede proporzioni, calcola proporzioni.
-Se richiede correlazioni, calcola correlazioni.
-Se richiede statistiche descrittive, calcolale.
+IMPORTANTE: 
+- OGNI calcolo statistico DEVE usare statsmodels
+- Se serve una correlazione → usa OLS di statsmodels
+- Se serve un test → usa statsmodels.stats
+- Se serve ANOVA → usa statsmodels.formula.api
+- NO scipy.stats, NO sklearn
 
-L'ULTIMA RIGA del tuo codice DEVE essere: print(json.dumps(results, default=str))
-
-Rispondi SOLO con il codice Python eseguibile, senza spiegazioni o markdown.
+Rispondi SOLO con codice Python eseguibile, senza spiegazioni o markdown.
 """
 
     try:
@@ -389,7 +552,10 @@ Rispondi SOLO con il codice Python eseguibile, senza spiegazioni o markdown.
         full_code = f"""
 import pandas as pd
 import numpy as np
-from scipy import stats
+import statsmodels.api as sm
+import statsmodels.formula.api as smf
+from statsmodels.stats import diagnostic, stattools
+from statsmodels.tsa import seasonal, stattools as tsa_stattools
 from datetime import datetime, timedelta
 import json
 
@@ -427,23 +593,19 @@ if 'print(json.dumps(results' not in '''{analysis_code}''':
             if json_output:
                 results = json.loads(json_output)
 
-                # ===== AGGIUNGI QUESTA PULIZIA =====
                 # Pulisci tutte le stringhe da caratteri di controllo
                 cleaned_results = {}
                 for key, value in results.items():
                     if isinstance(value, str):
-                        # Rimuovi \n, \r, \t e sostituisci con spazio singolo
                         cleaned_value = value.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
-                        # Rimuovi spazi multipli consecutivi
                         cleaned_value = ' '.join(cleaned_value.split())
                         cleaned_results[key] = cleaned_value
                     else:
                         cleaned_results[key] = value
-                # ===================================
 
-                state["analysis_results"] = cleaned_results  # <-- USA cleaned_results
+                state["analysis_results"] = cleaned_results
 
-                print(f"✓ Analisi completata: {len(cleaned_results)} metriche calcolate")
+                print(f"✓ Analisi completata con statsmodels: {len(cleaned_results)} metriche calcolate")
                 print(f"  Metriche: {list(cleaned_results.keys())}")
 
                 # Mostra alcuni risultati chiave
@@ -462,7 +624,7 @@ if 'print(json.dumps(results' not in '''{analysis_code}''':
     except json.JSONDecodeError as e:
         state["error"] = f"Errore nel parsing JSON dell'output: {str(e)}"
         print(f"❌ Errore JSON: {e}")
-        print(f"Output ricevuto:\n{output[:500]}...")  # Mostra primi 500 caratteri
+        print(f"Output ricevuto:\n{output[:500]}...")
         print(f"\nCodice generato:\n{analysis_code}")
 
     except Exception as e:
@@ -473,7 +635,6 @@ if 'print(json.dumps(results' not in '''{analysis_code}''':
         print(f"Traceback: {traceback.format_exc()}")
 
     return state
-
 # ==================== NODE 3: PLOT GENERATION ====================
 def plot_generation_node(state: SleepAnalysisState, llm: ChatGoogleGenerativeAI) -> SleepAnalysisState:
     """
