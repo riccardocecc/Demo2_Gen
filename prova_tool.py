@@ -11,25 +11,25 @@ import json
 import re
 from langchain_experimental.tools import PythonREPLTool
 from langchain_experimental.utilities import PythonREPL
+
 from settings import llm_code
 from tool import get_sleep_data
-
 
 python_repl = PythonREPLTool()
 # ==================== STATE DEFINITION ====================
 class SleepAnalysisState(TypedDict):
     """State che mantiene lo stato della conversazione attraverso i nodi"""
-    query: str  # Query originale dell'utente
-    subject_id: int  # ID del soggetto
-    period: str  # Periodo di analisi
-    raw_data: dict  # Dati grezzi estratti dal CSV
-    statistical_method: dict  # Metodo statistico selezionato con dettagli
-    analysis_code: str  # Codice Python per analisi statistica
-    analysis_results: dict  # Risultati dell'analisi statistica
-    plot_code: str  # Codice Python per generazione grafico
-    plot_html: str  # HTML del grafico Plotly
-    messages: list  # Storico messaggi
-    error: str  # Eventuali errori
+    query: str
+    subject_id: int
+    period: str
+    raw_data: dict
+    statistical_method: dict
+    analysis_code: str
+    analysis_results: dict
+    plot_code: str
+    plot_html: str
+    messages: list
+    error: str
 
 
 # ==================== TOOL DEFINITION ====================
@@ -60,7 +60,7 @@ def extract_sleep_data_node(state: SleepAnalysisState, llm: ChatGoogleGenerative
 
     # Prompt per l'LLM che deve chiamare il tool
     extraction_prompt = f"""
-    Sei un assistente che deve recuperare dati del sonno usando il tool get_sleep_data.
+    Sei un assistente che deve recuperare dati del sonno usando il tool get_sleep_data, devi SOLO ESTRARRE I PARAMETRI NON CONSIDERARE TUTTO IL RESTO.
 
     Query dell'utente: "{query}"
 
@@ -89,7 +89,7 @@ def extract_sleep_data_node(state: SleepAnalysisState, llm: ChatGoogleGenerative
             subject_id = tool_call['args'].get('subject_id', 1)
             period = tool_call['args'].get('period', 'last_30_days')
 
-            print(f"📊 Parametri estratti - Subject ID: {subject_id}, Period: {period}")
+            print(f" soggetto ID: {subject_id}, period: {period}")
 
             # Chiama il tool effettivamente
             result = get_sleep_data.invoke({
@@ -204,7 +204,7 @@ ISTRUZIONI:
 1. Identifica l'obiettivo principale della query
 2. Determina quale approccio statistico risponde meglio alla domanda
 3. Identifica le variabili specifiche da analizzare (usa i nomi esatti delle colonne)
-4. Specifica i metodi statistici da applicare
+4. Specifica il metodo statistico da applicare più opportuno
 5. Indica quali metriche e output calcolare
 6. Suggerisci il tipo di visualizzazione più appropriato
 
@@ -213,7 +213,7 @@ Rispondi in formato JSON con questa struttura:
     "analysis_goal": "obiettivo principale dell'analisi",
     "analysis_type": "tipo di analisi (es: correlation, proportion, descriptive, trend, comparison, etc.)",
     "variables": ["lista", "delle", "colonne", "da", "analizzare"],
-    "statistical_methods": ["metodo1", "metodo2"],
+    "statistical_methods": ["metodo"],
     "calculations_needed": {{
         "metric1": "descrizione calcolo",
         "metric2": "descrizione calcolo"
@@ -461,84 +461,120 @@ if 'print(json.dumps(results' not in '''{analysis_code}''':
 def plot_generation_node(state: SleepAnalysisState, llm: ChatGoogleGenerativeAI) -> SleepAnalysisState:
     """
     Nodo 3: Genera ed esegue codice Python per creare un grafico Plotly
-    con retry logic e validazione del codice.
+    con retry logic, validazione del codice e propagazione corretta degli errori.
     """
     print("\n[NODE 3] Generazione grafico Plotly...")
 
+    # Se c'è già un errore nello state, non procedere
     if state.get("error"):
         return state
 
+    # Estrai dati dallo state
     query = state["query"]
     analysis_results = state["analysis_results"]
     raw_data = state["raw_data"]
     method_selection = state.get("statistical_method", {})
+    visualization_type = method_selection.get("visualization_type", "grafico generico")
 
-    # Tentativi massimi
+    # Configurazione retry logic
     max_attempts = 3
     attempt = 0
 
     while attempt < max_attempts:
         attempt += 1
-        print(f"\n🔄 Tentativo {attempt}/{max_attempts}")
+        print(f"\nTentativo {attempt}/{max_attempts}")
 
         try:
-            # Crea prompt (con feedback da tentativi precedenti)
+            # ============================================================
+            # STEP 1: Genera il prompt con feedback da tentativi precedenti
+            # ============================================================
             plot_prompt = create_plot_prompt(
                 query=query,
-                method_selection=method_selection,
+                visualization_type=visualization_type,
                 analysis_results=analysis_results,
                 previous_error=state.get("last_plot_error"),
                 previous_code=state.get("plot_code")
             )
 
-            # Genera codice con LLM
+            # ============================================================
+            # STEP 2: Genera codice con LLM
+            # ============================================================
             response = llm.invoke([HumanMessage(content=plot_prompt)])
             plot_code = response.content.strip()
 
-            # Pulisci il codice
+            # ============================================================
+            # STEP 3: Pulisci il codice generato
+            # ============================================================
             plot_code = clean_generated_code(plot_code)
 
-            # Valida il codice
+            # ============================================================
+            # STEP 4: Valida il codice prima dell'esecuzione
+            # ============================================================
             validation_error = validate_plotly_code(plot_code)
             if validation_error:
-                print(f"⚠️ Validazione fallita: {validation_error}")
+                print(f"  ⚠️  Validazione fallita: {validation_error}")
                 state["last_plot_error"] = validation_error
-                continue
+                continue  # Riprova con il prossimo tentativo
 
+            # Salva il codice nello state
             state["plot_code"] = plot_code
 
-            # Esegui il codice
-            plot_html = execute_plot_code(
+            # ============================================================
+            # STEP 5: Esegui il codice e cattura eventuali errori
+            # ============================================================
+
+            plot_html, execution_error = execute_plot_code(
                 plot_code=plot_code,
                 raw_data=raw_data,
                 analysis_results=analysis_results,
                 method_selection=method_selection
             )
 
+            # ============================================================
+            # STEP 6: Verifica il risultato
+            # ============================================================
             if plot_html:
+                # Successo! Rimuovi eventuali errori precedenti
                 state["plot_html"] = plot_html
-                state.pop("last_plot_error", None)  # Rimuovi errori precedenti
-                print("✓ Grafico generato con successo")
+                state.pop("last_plot_error", None)
+                print(" Grafico generato con successo!")
                 return state
             else:
-                raise ValueError("HTML del grafico vuoto")
+                # Esecuzione fallita, solleva eccezione con errore dettagliato
+                error_msg = execution_error or "HTML del grafico vuoto (causa sconosciuta)"
+                raise ValueError(error_msg)
 
         except Exception as e:
+            # ============================================================
+            # GESTIONE ERRORI
+            # ============================================================
             error_msg = str(e)
-            print(f"❌ Errore tentativo {attempt}: {error_msg}")
+            print(f"  Errore tentativo {attempt}: {error_msg[:200]}...")
+
+            # Salva l'errore per il prossimo tentativo
             state["last_plot_error"] = error_msg
 
+            # Se è l'ultimo tentativo, salva l'errore definitivo nello state
             if attempt == max_attempts:
-                state[
-                    "error"] = f"Impossibile generare il grafico dopo {max_attempts} tentativi. Ultimo errore: {error_msg}"
-                print(f"Codice generato:\n{state.get('plot_code', 'N/A')}")
-                import traceback
-                print(f"Traceback: {traceback.format_exc()}")
+                state["error"] = (
+                    f"Impossibile generare il grafico dopo {max_attempts} tentativi.\n\n"
+                    f"Ultimo errore: {error_msg}"
+                )
+                print(f"\n ERRORE FINALE dopo {max_attempts} tentativi")
+                print(f"\nCodice generato nell'ultimo tentativo:")
+                print("=" * 60)
+                print(state.get('plot_code', 'N/A'))
+                print("=" * 60)
 
+                # Log traceback completo per debug
+                import traceback
+                print(f"\nTraceback completo:")
+                print(traceback.format_exc())
+
+    # Se usciamo dal loop senza successo, lo state contiene già l'errore
     return state
 
-
-def create_plot_prompt(query: str, method_selection: dict, analysis_results: dict,
+def create_plot_prompt(query: str, visualization_type: dict, analysis_results: dict,
                        previous_error: str = None, previous_code: str = None) -> str:
     """Crea il prompt per la generazione del grafico con feedback iterativo"""
 
@@ -546,12 +582,6 @@ def create_plot_prompt(query: str, method_selection: dict, analysis_results: dic
 Sei un esperto nella visualizzazione dati con Plotly per analisi del sonno.
 
 Query originale: "{query}"
-
-METODO STATISTICO SELEZIONATO (da rispettare RIGOROSAMENTE):
-- Obiettivo: {method_selection.get('analysis_goal', '')}
-- Tipo di analisi: {method_selection.get('analysis_type', '')}
-- Variabili analizzate: {method_selection.get('variables', [])}
-- Tipo di visualizzazione suggerita: {method_selection.get('visualization_type', '')}
 
 RISULTATI DELL'ANALISI STATISTICA (da integrare nel grafico):
 {json.dumps(analysis_results, indent=2, default=str)}
@@ -570,11 +600,7 @@ COLONNE DISPONIBILI NEL DATAFRAME 'df':
 
 ISTRUZIONI CRITICHE:
 
-1. Il grafico DEVE essere PERFETTAMENTE COERENTE con:
-   - Il tipo di analisi selezionata
-   - Le variabili specificate
-   - Il tipo di visualizzazione suggerita
-   - I risultati dell'analisi
+1. Crea un grafico: {visualization_type}
 
 2. INTEGRA i risultati dell'analisi nel grafico:
    - Aggiungi annotazioni con valori chiave
@@ -593,7 +619,7 @@ REQUISITI TECNICI:
 - Gestisci NaN nei dati con dropna() se necessario
 - NON stampare nulla, NON usare fig.show()
 - USA SOLO queste librerie già importate: pandas (pd), numpy (np), plotly.graph_objects (go), plotly.express (px)
-- NON importare statsmodels, scikit-learn, matplotlib, seaborn o altre librerie esterne
+- NON IMPORTARE !!! statsmodels, scikit-learn, matplotlib, seaborn o altre librerie esterne
 
 
 ERRORI DA EVITARE ASSOLUTAMENTE:
@@ -628,7 +654,7 @@ Rispondi SOLO con codice Python eseguibile che crea 'fig'.
     if previous_error and previous_code:
         feedback = f"""
 
-❌ ERRORE NEL TENTATIVO PRECEDENTE:
+ERRORE NEL TENTATIVO PRECEDENTE:
 {previous_error}
 
 CODICE CHE HA CAUSATO L'ERRORE:
@@ -737,35 +763,37 @@ print("__PLOT_START__")
 print(html_output)
 print("__PLOT_END__")
 """
+    try:
+        output = python_repl.run(full_code)
+        if output:
+            lines = output.strip().split('\n')
+            for i, line in enumerate(lines):
+                if line.strip().startswith('<!DOCTYPE') or line.strip().startswith('<html'):
+                    return '\n'.join(lines[i:]), None
 
-    # Esegui
-    output = python_repl.run(full_code)
 
-    print(output)
+        return None, f"Nessun HTML trovato nell'output:\n{output[:500]}"
+    except Exception as e:
+        import traceback
+        error_detail = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
+        return None, error_detail
 
-    # Fallback
-    if output:
-        lines = output.strip().split('\n')
-        for i, line in enumerate(lines):
-            if line.strip().startswith('<!DOCTYPE') or line.strip().startswith('<html'):
-                return '\n'.join(lines[i:])
 
-    return None
 #==================== GRAPH CREATION ====================
 def create_sleep_analysis_chain() -> StateGraph:
     """
     Crea la chain LangGraph con i 4 nodi.
     """
-    # Crea il grafo
+
     workflow = StateGraph(SleepAnalysisState)
 
-    # Aggiungi i nodi
+
     workflow.add_node("extract_data", lambda state: extract_sleep_data_node(state, llm_code))
     workflow.add_node("select_method", lambda state: select_statistical_method_node(state, llm_code))
     workflow.add_node("analyze", lambda state: statistical_analysis_node(state, llm_code))
     workflow.add_node("plot", lambda state: plot_generation_node(state, llm_code))
 
-    # Definisci il flusso
+
     workflow.set_entry_point("extract_data")
 
     # Funzione per controllare errori dopo extract_data
@@ -818,7 +846,13 @@ def create_sleep_analysis_chain() -> StateGraph:
 
     # Edge finale: plot → END
     workflow.add_edge("plot", END)
+    #graph = workflow.compile()
+    #png_data = graph.get_graph().draw_mermaid_png()
 
+    #output_file = "sleep_analysis_graph.png"
+    #with open(output_file, "wb") as f:
+    #    f.write(png_data)
+    #print(f"✓ Grafo salvato in: {output_file}")
     return workflow.compile()
 
 
@@ -896,10 +930,9 @@ def create_sleep_analysis_chain_with_config_llm(llm_code: ChatGoogleGenerativeAI
 
 # ==================== MAIN ====================
 if __name__ == "__main__":
-    # Test con diverse query che richiedono approcci diversi
-    queries = [
 
-        "Qual è la correlazione tra frequenza cardiaca e durata del sonno REM negli ultimi 30 giorni?"
+    queries = [
+        "C'è correlazione tra il numero di risvegli e la frequenza cardiaca negli ultimi 10 giorni?"
     ]
 
     for query in queries:

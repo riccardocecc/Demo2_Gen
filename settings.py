@@ -134,5 +134,3 @@ SLEEP_DATA_PATH = DATA_DIR / "sonno_data.csv"
 KITCHEN_DATA_PATH = DATA_DIR / "cucina_data.csv"
 SENSOR_DATA_PATH = DATA_DIR / "sensor_data.csv"
 
-if __name__ == "__main__":
-    print("Loading data...")
