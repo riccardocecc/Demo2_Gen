@@ -22,7 +22,8 @@ class SleepAnalysisState(TypedDict):
     query: str
     subject_id: int
     period: str
-    raw_data: dict
+    raw_data: dict  # Può contenere sleep_data, kitchen_data, o entrambi
+    data_sources: list  # ['sleep', 'kitchen'] o ['sleep'] o ['kitchen']
     statistical_method: dict
     analysis_code: str
     analysis_results: dict
@@ -30,6 +31,7 @@ class SleepAnalysisState(TypedDict):
     plot_html: str
     messages: list
     error: str
+    final_response: str
 
 
 # ==================== TOOL DEFINITION ====================
@@ -424,13 +426,28 @@ if 'print(json.dumps(results' not in '''{analysis_code}''':
 
             if json_output:
                 results = json.loads(json_output)
-                state["analysis_results"] = results
 
-                print(f"✓ Analisi completata: {len(results)} metriche calcolate")
-                print(f"  Metriche: {list(results.keys())}")
+                # ===== AGGIUNGI QUESTA PULIZIA =====
+                # Pulisci tutte le stringhe da caratteri di controllo
+                cleaned_results = {}
+                for key, value in results.items():
+                    if isinstance(value, str):
+                        # Rimuovi \n, \r, \t e sostituisci con spazio singolo
+                        cleaned_value = value.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+                        # Rimuovi spazi multipli consecutivi
+                        cleaned_value = ' '.join(cleaned_value.split())
+                        cleaned_results[key] = cleaned_value
+                    else:
+                        cleaned_results[key] = value
+                # ===================================
+
+                state["analysis_results"] = cleaned_results  # <-- USA cleaned_results
+
+                print(f"✓ Analisi completata: {len(cleaned_results)} metriche calcolate")
+                print(f"  Metriche: {list(cleaned_results.keys())}")
 
                 # Mostra alcuni risultati chiave
-                for key, value in list(results.items())[:5]:
+                for key, value in list(cleaned_results.items())[:5]:
                     if isinstance(value, (int, float)):
                         print(f"  - {key}: {value:.4f}" if isinstance(value, float) else f"  - {key}: {value}")
                     else:
@@ -601,11 +618,6 @@ COLONNE DISPONIBILI NEL DATAFRAME 'df':
 ISTRUZIONI CRITICHE:
 
 1. Crea un grafico: {visualization_type}
-
-2. INTEGRA i risultati dell'analisi nel grafico:
-   - Aggiungi annotazioni con valori chiave
-   - Mostra metriche statistiche rilevanti
-   - Evidenzia pattern identificati nell'analisi
 
 3. Usa ESATTAMENTE le variabili da method_selection['variables']
 
@@ -779,6 +791,71 @@ print("__PLOT_END__")
         return None, error_detail
 
 
+#====================CORRELATION NODE====================
+# ==================== NODE 4: NATURAL LANGUAGE RESPONSE ====================
+def generate_response_node(state: SleepAnalysisState, llm: ChatGoogleGenerativeAI) -> SleepAnalysisState:
+    """
+    Nodo 4: Genera una risposta in linguaggio naturale per medici
+    basata sui risultati dell'analisi statistica.
+    """
+    print("\n[NODE 4] Generazione risposta...")
+
+    if state.get("error"):
+        return state
+
+    query = state["query"]
+    analysis_results = state["analysis_results"]
+    method_selection = state.get("statistical_method", {})
+    subject_id = state["subject_id"]
+    period = state["period"]
+    num_records = len(state["raw_data"]["records"])
+
+    response_prompt = f"""
+Sei un assistente medico che deve spiegare risultati statistici a un medico in modo chiaro e clinicamente rilevante.
+
+QUERY ORIGINALE DEL MEDICO:
+"{query}"
+
+CONTESTO DELL'ANALISI:
+- Paziente ID: {subject_id}
+- Periodo analizzato: {period}
+- Numero di notti: {num_records}
+- Tipo di analisi: {method_selection.get('analysis_type', 'N/A')}
+
+RISULTATI STATISTICI:
+{json.dumps(analysis_results, indent=2, default=str)}
+
+ISTRUZIONI:
+1. Rispondi DIRETTAMENTE alla domanda del medico
+2. Usa linguaggio clinico ma accessibile (evita gergo statistico complesso), NON FARE SUPPOSIZIONI CLINICHE SUI DEI DATI. LIMITATI A RISPONDERE
+3. Struttura la risposta in 3 parti:
+   - Risposta diretta (2-3 frasi)
+
+4. Traduci valori statistici in termini comprensibili, esempio:
+   - Invece di "p-value < 0.05" → "statisticamente significativo"
+   - Invece di "r = 0.98" → "forte correlazione positiva"
+   - Converti unità se necessario (minuti → ore, etc.)
+
+5. Sii conciso: massimo 150 parole totali
+
+6. NON usare formattazione markdown, grassetto, o titoli
+7. Scrivi in paragrafi continui, senza elenchi puntati
+
+Rispondi SOLO con il testo della risposta, senza preamboli.
+"""
+
+    try:
+        response = llm.invoke([HumanMessage(content=response_prompt)])
+        final_response = response.content.strip()
+
+        state["final_response"] = final_response
+        print(f"✓ Risposta generata ({len(final_response)} caratteri)")
+
+    except Exception as e:
+        state["error"] = f"Errore nella generazione risposta: {str(e)}"
+        print(f"❌ Errore: {e}")
+
+    return state
 #==================== GRAPH CREATION ====================
 def create_sleep_analysis_chain() -> StateGraph:
     """
@@ -792,6 +869,7 @@ def create_sleep_analysis_chain() -> StateGraph:
     workflow.add_node("select_method", lambda state: select_statistical_method_node(state, llm_code))
     workflow.add_node("analyze", lambda state: statistical_analysis_node(state, llm_code))
     workflow.add_node("plot", lambda state: plot_generation_node(state, llm_code))
+    workflow.add_node("respond", lambda state: generate_response_node(state, llm_code))  # <-- NUOVO
 
 
     workflow.set_entry_point("extract_data")
@@ -813,6 +891,12 @@ def create_sleep_analysis_chain() -> StateGraph:
         if state.get("error"):
             return "end"
         return "plot"
+
+    def check_error_plot(state: SleepAnalysisState) -> Literal["respond", "end"]:
+        if state.get("error"):
+            return "end"
+        return "respond"
+
 
     # Edge condizionale dopo extract_data → select_method
     workflow.add_conditional_edges(
@@ -844,8 +928,11 @@ def create_sleep_analysis_chain() -> StateGraph:
         }
     )
 
+    workflow.add_conditional_edges("plot", check_error_plot,
+                                   {"respond": "respond", "end": END})
+
     # Edge finale: plot → END
-    workflow.add_edge("plot", END)
+    workflow.add_edge("respond", END)
     #graph = workflow.compile()
     #png_data = graph.get_graph().draw_mermaid_png()
 
@@ -865,10 +952,8 @@ def run_analysis(query: str):
     print(f"QUERY: {query}")
     print(f"{'=' * 60}")
 
-    # Crea la chain
     chain = create_sleep_analysis_chain()
 
-    # Stato iniziale
     initial_state = {
         "query": query,
         "subject_id": 0,
@@ -879,14 +964,13 @@ def run_analysis(query: str):
         "analysis_results": {},
         "plot_code": "",
         "plot_html": "",
+        "final_response": "",  # <-- NUOVO
         "messages": [],
         "error": ""
     }
 
-    # Esegui la chain
     final_state = chain.invoke(initial_state)
 
-    # Mostra risultati
     print(f"\n{'=' * 60}")
     print("RISULTATI")
     print(f"{'=' * 60}")
@@ -898,21 +982,15 @@ def run_analysis(query: str):
         print(f"✓ Period: {final_state['period']}")
         print(f"✓ Records analizzati: {len(final_state['raw_data']['records'])}")
 
-        print(f"\n--- Metodo Statistico Selezionato ---")
-        method = final_state.get('statistical_method', {})
-        print(f"  Tipo: {method.get('analysis_type', 'N/A')}")
-        print(f"  Obiettivo: {method.get('analysis_goal', 'N/A')}")
-        print(f"  Variabili: {method.get('variables', [])}")
+        # Mostra la risposta clinica
+        print(f"\n{'=' * 60}")
+        print("RISPOSTA CLINICA")
+        print(f"{'=' * 60}")
+        print(final_state['final_response'])
+        print(f"{'=' * 60}")
 
-        print(f"\n--- Risultati Analisi Statistica ---")
-        for key, value in final_state['analysis_results'].items():
-            if isinstance(value, (int, float)):
-                print(f"  {key}: {value:.4f}" if isinstance(value, float) else f"  {key}: {value}")
-            else:
-                print(f"  {key}: {value}")
-
+        # Dettagli tecnici (opzionale, per debug)
         if final_state.get("plot_html"):
-            # Salva il grafico
             output_file = f"sleep_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
             with open(output_file, 'w', encoding='utf-8') as f:
                 f.write(final_state["plot_html"])
@@ -920,13 +998,16 @@ def run_analysis(query: str):
 
     return final_state
 
-
 def create_sleep_analysis_chain_with_config_llm(llm_code: ChatGoogleGenerativeAI) -> StateGraph:
     """
     Versione per usare con llm_code già configurato da backend.config.settings
     """
     return create_sleep_analysis_chain()
 
+# Alla fine del file, aggiungi:
+def get_chain():
+    """Funzione helper per Streamlit"""
+    return create_sleep_analysis_chain()
 
 # ==================== MAIN ====================
 if __name__ == "__main__":
