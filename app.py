@@ -6,7 +6,7 @@ from prova_tool import create_sleep_analysis_chain
 # Configurazione pagina
 st.set_page_config(
     page_title="Demo Multi Agent - Only Gen",
-    page_icon="",
+    page_icon="📊",
     layout="wide"
 )
 
@@ -18,7 +18,7 @@ if "chain" not in st.session_state:
     st.session_state.chain = create_sleep_analysis_chain()
 
 # Header
-st.title("Demo Multi Agent - Only Gen")
+st.title("📊 Demo Multi Agent - Only Gen")
 st.markdown("Analisi statistiche più approfondite")
 
 # Mostra chat history
@@ -26,9 +26,13 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-        # Se c'è un grafico, mostralo
-        if "plot_html" in message:
-            st.components.v1.html(message["plot_html"], height=500, scrolling=True)
+        # Se c'è un grafico Vega-Lite, mostralo
+        if "vega_spec" in message:
+            st.vega_lite_chart(
+                data=message["vega_spec"].get("data", {}).get("values", []),
+                spec=message["vega_spec"],
+                use_container_width=True
+            )
 
 # Input utente
 if prompt := st.chat_input("Es: C'è correlazione tra risvegli e frequenza cardiaca negli ultimi 10 giorni?"):
@@ -40,7 +44,7 @@ if prompt := st.chat_input("Es: C'è correlazione tra risvegli e frequenza cardi
 
     # Mostra spinner mentre elabora
     with st.chat_message("assistant"):
-        with st.spinner("Analizzo i dati..."):
+        with st.spinner("🔍 Analizzo i dati..."):
 
             # Esegui analisi
             initial_state = {
@@ -48,10 +52,13 @@ if prompt := st.chat_input("Es: C'è correlazione tra risvegli e frequenza cardi
                 "subject_id": 0,
                 "period": "",
                 "raw_data": {},
+                "data_sources": [],
                 "statistical_method": {},
                 "analysis_code": "",
                 "analysis_results": {},
-                "plot_code": "",
+                "analysis_errors": [],
+                "analysis_attempts": 0,
+                "vega_spec": {},
                 "plot_html": "",
                 "final_response": "",
                 "messages": [],
@@ -75,11 +82,17 @@ if prompt := st.chat_input("Es: C'è correlazione tra risvegli e frequenza cardi
                 st.markdown(response)
 
                 # Mostra grafico se presente
-                if final_state.get("plot_html"):
-                    st.components.v1.html(
-                        final_state["plot_html"],
-                        height=500,
-                        scrolling=True
+                if final_state.get("vega_spec"):
+                    vega_spec = final_state["vega_spec"]
+
+                    # Estrai i dati dalla spec
+                    chart_data = vega_spec.get("data", {}).get("values", [])
+
+                    # Visualizza con Streamlit
+                    st.vega_lite_chart(
+                        data=chart_data,
+                        spec=vega_spec,
+                        use_container_width=True
                     )
 
                 # Salva in session state
@@ -88,14 +101,14 @@ if prompt := st.chat_input("Es: C'è correlazione tra risvegli e frequenza cardi
                     "content": response
                 }
 
-                if final_state.get("plot_html"):
-                    message_data["plot_html"] = final_state["plot_html"]
+                if final_state.get("vega_spec"):
+                    message_data["vega_spec"] = final_state["vega_spec"]
 
                 st.session_state.messages.append(message_data)
 
 # Sidebar con info
 with st.sidebar:
-    st.header("Informazioni")
+    st.header("ℹ️ Informazioni")
     st.markdown("""
     **Esempi di domande:**
     - C'è correlazione tra risvegli e frequenza cardiaca?
@@ -105,4 +118,9 @@ with st.sidebar:
     """)
 
     st.markdown("---")
-    st.caption(f"Messaggi nella chat: {len(st.session_state.messages)}")
+    st.caption(f"💬 Messaggi nella chat: {len(st.session_state.messages)}")
+
+    # Pulsante per pulire la chat
+    if st.button("🗑️ Pulisci chat"):
+        st.session_state.messages = []
+        st.rerun()

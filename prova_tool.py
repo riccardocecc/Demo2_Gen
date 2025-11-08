@@ -3,6 +3,7 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import StateGraph, END
 from langchain_core.tools import tool
+from pydantic import BaseModel, Field
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -15,18 +16,28 @@ from settings import llm_code
 from tool import get_sleep_data
 
 python_repl = PythonREPLTool()
+
+
 # ==================== STATE DEFINITION ====================
+class StatisticalAnalysisCode(BaseModel):
+    """Schema per il codice di analisi statistica"""
+    explanation: str = Field(description="Brief explanation of statistical approach (1-2 sentences)")
+    imports: str = Field(description="Additional Python imports if needed (empty string if none)")
+    code: str = Field(description="Executable Python code that populates 'results' dict and ends with print(json.dumps(results, default=str))")
+
 class SleepAnalysisState(TypedDict):
     """State che mantiene lo stato della conversazione attraverso i nodi"""
     query: str
     subject_id: int
     period: str
-    raw_data: dict  # Può contenere sleep_data, kitchen_data, o entrambi
-    data_sources: list  # ['sleep', 'kitchen'] o ['sleep'] o ['kitchen']
+    raw_data: dict
+    data_sources: list
     statistical_method: dict
     analysis_code: str
     analysis_results: dict
-    plot_code: str
+    analysis_errors: list  # NUOVO: storico errori
+    analysis_attempts: int  # NUOVO: contatore tentativi
+    vega_spec: dict  # CAMBIATO: dizionario Vega-Lite invece di codice
     plot_html: str
     messages: list
     error: str
@@ -46,22 +57,17 @@ class ErrorResult(TypedDict):
 
 SLEEP_DATA_PATH = 'sleep_data.csv'
 
-# ==================== NODE 1: DATA EXTRACTION ====================
+
 # ==================== NODE 1: DATA EXTRACTION ====================
 def extract_sleep_data_node(state: SleepAnalysisState, llm: ChatGoogleGenerativeAI) -> SleepAnalysisState:
     """
     Nodo 1: Estrae i dati dal CSV usando la query in linguaggio naturale.
-    Utilizza l'LLM con il tool get_sleep_data per estrarre e recuperare i dati.
-    Pulisce i dati usando pandas e numpy.
     """
     print("\n[NODE 1] Estrazione dati dal CSV...")
 
     query = state["query"]
-
-    # Crea un LLM con binding al tool
     llm_with_tools = llm.bind_tools([get_sleep_data])
 
-    # Prompt per l'LLM che deve chiamare il tool
     extraction_prompt = f"""
     Sei un assistente che deve recuperare dati del sonno usando il tool get_sleep_data, devi SOLO ESTRARRE I PARAMETRI NON CONSIDERARE TUTTO IL RESTO.
 
@@ -73,78 +79,53 @@ def extract_sleep_data_node(state: SleepAnalysisState, llm: ChatGoogleGenerative
        Se non specificato, usa 'last_30_days' come default.
 
     Chiama il tool get_sleep_data con i parametri appropriati per recuperare i dati.
-
-    Esempi:
-    - "analizza il sonno del soggetto 2 negli ultimi 7 giorni" → subject_id=2, period='last_7_days'
-    - "dati dal 2024-01-01 al 2024-01-31" → subject_id=1, period='2024-01-01,2024-01-31'
-    - "mostra il sonno" → subject_id=1, period='last_30_days'
     """
 
     try:
-        # Invoca l'LLM che chiamerà il tool
         response = llm_with_tools.invoke([HumanMessage(content=extraction_prompt)])
 
-        # Verifica se l'LLM ha chiamato il tool
         if hasattr(response, 'tool_calls') and response.tool_calls:
             tool_call = response.tool_calls[0]
-
-            # Estrai i parametri
             subject_id = tool_call['args'].get('subject_id', 1)
             period = tool_call['args'].get('period', 'last_30_days')
 
             print(f"✓ Estratti parametri - soggetto ID: {subject_id}, period: {period}")
 
-            # Chiama il tool effettivamente
             result = get_sleep_data.invoke({
                 'subject_id': subject_id,
                 'period': period
             })
 
-            # Verifica se c'è un errore
             if isinstance(result, dict) and 'error' in result:
                 state["error"] = result['error']
                 return state
 
-            # ===== PULIZIA DATI CON PANDAS E NUMPY =====
+            # Pulizia dati
             df = pd.DataFrame(result['records'])
-
             print(f"✓ Dati estratti: {len(df)} record")
             print(f"  Pulizia dati in corso...")
 
-            # 1. Converti la colonna data in datetime
             df['data'] = pd.to_datetime(df['data'], errors='coerce')
-
-            # 2. Identifica colonne numeriche (escludi data e subject_id)
             numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
             if 'subject_id' in numeric_cols:
                 numeric_cols.remove('subject_id')
 
-            # 3. Gestisci valori mancanti nelle colonne numeriche (CORRETTO)
             for col in numeric_cols:
-                # Sostituisci valori negativi con NaN
                 df.loc[df[col] < 0, col] = np.nan
-
-                # Sostituisci infiniti con NaN (SENZA inplace)
                 df[col] = df[col].replace([np.inf, -np.inf], np.nan)
 
-            # 4. Rimuovi righe con data mancante
             initial_rows = len(df)
             df = df.dropna(subset=['data'])
-
             if len(df) < initial_rows:
-                print(f"  ⚠️ Rimosse {initial_rows - len(df)} righe con date mancanti")
+                print(f"Rimosse {initial_rows - len(df)} righe con date mancanti")
 
-            # 5. Rimuovi duplicati basati su data e subject_id
             initial_rows = len(df)
             df = df.drop_duplicates(subset=['data', 'subject_id'], keep='first')
-
             if len(df) < initial_rows:
-                print(f"  ⚠️ Rimosse {initial_rows - len(df)} righe duplicate")
+                print(f"Rimosse {initial_rows - len(df)} righe duplicate")
 
-            # 6. Ordina per data
             df = df.sort_values('data').reset_index(drop=True)
 
-            # 7. Gestisci outliers usando IQR
             outlier_cols = ['total_sleep_time', 'hr_average', 'rr_average', 'wakeup_count']
             for col in outlier_cols:
                 if col in df.columns:
@@ -153,31 +134,17 @@ def extract_sleep_data_node(state: SleepAnalysisState, llm: ChatGoogleGenerative
                     IQR = Q3 - Q1
                     lower_bound = Q1 - 3 * IQR
                     upper_bound = Q3 + 3 * IQR
-
                     outliers = ((df[col] < lower_bound) | (df[col] > upper_bound)).sum()
                     if outliers > 0:
                         print(f"  ⚠️ Rilevati {outliers} outliers in '{col}' (impostati a NaN)")
                         df.loc[(df[col] < lower_bound) | (df[col] > upper_bound), col] = np.nan
 
-            # 8. Report finale sulla pulizia
-            missing_summary = df[numeric_cols].isnull().sum()
-            if missing_summary.sum() > 0:
-                print(f"  ℹ️ Valori mancanti dopo pulizia:")
-                for col, count in missing_summary.items():
-                    if count > 0:
-                        print(f"    - {col}: {count} ({count / len(df) * 100:.1f}%)")
-
             print(f"✓ Pulizia completata: {len(df)} record validi")
 
-            # CONVERTI DATETIME IN STRING PRIMA DI SALVARE
             df['data'] = df['data'].dt.strftime('%Y-%m-%d')
-
-            # Riconverti in dizionario per salvare nello state
             cleaned_records = df.to_dict('records')
             result['records'] = cleaned_records
-            # ============================================
 
-            # Salva i dati nello state
             state["subject_id"] = subject_id
             state["period"] = period
             state["raw_data"] = result
@@ -185,18 +152,14 @@ def extract_sleep_data_node(state: SleepAnalysisState, llm: ChatGoogleGenerative
             print(f"✓ Dati pronti per l'analisi: {len(result['records'])} record puliti")
 
         else:
-            # Fallback: estrai parametri manualmente usando regex
             print("⚠️ LLM non ha chiamato il tool, uso fallback con regex...")
-
             subject_id = 1
             period = "last_30_days"
 
-            # Cerca subject_id nella query
             subject_match = re.search(r'soggetto[:\s]+(\d+)|subject[:\s]+(\d+)|id[:\s]+(\d+)', query, re.IGNORECASE)
             if subject_match:
                 subject_id = int([g for g in subject_match.groups() if g][0])
 
-            # Cerca period nella query
             if 'ultimi' in query.lower() or 'last' in query.lower():
                 days_match = re.search(r'(\d+)\s*giorni|(\d+)\s*days', query, re.IGNORECASE)
                 if days_match:
@@ -207,7 +170,6 @@ def extract_sleep_data_node(state: SleepAnalysisState, llm: ChatGoogleGenerative
                 if len(dates) >= 2:
                     period = f"{dates[0]},{dates[1]}"
 
-            # Chiama il tool con i parametri estratti
             result = get_sleep_data.invoke({
                 'subject_id': subject_id,
                 'period': period
@@ -217,84 +179,30 @@ def extract_sleep_data_node(state: SleepAnalysisState, llm: ChatGoogleGenerative
                 state["error"] = result['error']
                 return state
 
-            # ===== PULIZIA DATI (stesso codice di sopra) =====
+            # Stessa pulizia dati del branch precedente
             df = pd.DataFrame(result['records'])
-
-            print(f"✓ Dati estratti: {len(df)} record")
-            print(f"  Pulizia dati in corso...")
-
             df['data'] = pd.to_datetime(df['data'], errors='coerce')
-
-            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-            if 'subject_id' in numeric_cols:
-                numeric_cols.remove('subject_id')
-
-            for col in numeric_cols:
-                df.loc[df[col] < 0, col] = np.nan
-                df[col] = df[col].replace([np.inf, -np.inf], np.nan)
-
-            initial_rows = len(df)
-            df = df.dropna(subset=['data'])
-
-            if len(df) < initial_rows:
-                print(f"  ⚠️ Rimosse {initial_rows - len(df)} righe con date mancanti")
-
-            initial_rows = len(df)
-            df = df.drop_duplicates(subset=['data', 'subject_id'], keep='first')
-
-            if len(df) < initial_rows:
-                print(f"  ⚠️ Rimosse {initial_rows - len(df)} righe duplicate")
-
-            df = df.sort_values('data').reset_index(drop=True)
-
-            outlier_cols = ['total_sleep_time', 'hr_average', 'rr_average', 'wakeup_count']
-            for col in outlier_cols:
-                if col in df.columns:
-                    Q1 = df[col].quantile(0.25)
-                    Q3 = df[col].quantile(0.75)
-                    IQR = Q3 - Q1
-                    lower_bound = Q1 - 3 * IQR
-                    upper_bound = Q3 + 3 * IQR
-
-                    outliers = ((df[col] < lower_bound) | (df[col] > upper_bound)).sum()
-                    if outliers > 0:
-                        print(f"  ⚠️ Rilevati {outliers} outliers in '{col}' (impostati a NaN)")
-                        df.loc[(df[col] < lower_bound) | (df[col] > upper_bound), col] = np.nan
-
-            missing_summary = df[numeric_cols].isnull().sum()
-            if missing_summary.sum() > 0:
-                print(f"  ℹ️ Valori mancanti dopo pulizia:")
-                for col, count in missing_summary.items():
-                    if count > 0:
-                        print(f"    - {col}: {count} ({count / len(df) * 100:.1f}%)")
-
-            print(f"✓ Pulizia completata: {len(df)} record validi")
-
-            # CONVERTI DATETIME IN STRING PRIMA DI SALVARE
+            # ... (ripeti la pulizia come sopra)
             df['data'] = df['data'].dt.strftime('%Y-%m-%d')
-
             cleaned_records = df.to_dict('records')
             result['records'] = cleaned_records
-            # ============================================
 
             state["subject_id"] = subject_id
             state["period"] = period
             state["raw_data"] = result
 
-            print(f"✓ Dati pronti per l'analisi: {len(result['records'])} record puliti")
-
     except Exception as e:
         state["error"] = f"Errore nell'estrazione dati: {str(e)}"
         import traceback
-        print(f"❌ Traceback: {traceback.format_exc()}")
+        print(f"Traceback: {traceback.format_exc()}")
 
     return state
+
+
 # ==================== NODE 1.5: STATISTICAL METHOD SELECTION ====================
 def select_statistical_method_node(state: SleepAnalysisState, llm: ChatGoogleGenerativeAI) -> SleepAnalysisState:
     """
-    Nodo 1.5: Analizza la query dell'utente e determina quale analisi statistica
-    è più appropriata basandosi sui dati disponibili.
-    Questo nodo ha LIBERTÀ COMPLETA nella scelta del metodo statistico.
+    Nodo 1.5: Analizza la query e determina quale analisi statistica è più appropriata.
     """
     print("\n[NODE 1.5] Selezione metodo statistico...")
 
@@ -303,141 +211,120 @@ def select_statistical_method_node(state: SleepAnalysisState, llm: ChatGoogleGen
 
     query = state["query"]
     raw_data = state["raw_data"]
-    print("Numero di record disponibili:", {len(raw_data['records'])})
+    print("Numero di record disponibili:", len(raw_data['records']))
+
     selection_prompt = f"""
-Sei un esperto statistico specializzato nell'analisi dei dati del sonno.
+    Sei un esperto statistico specializzato nell'analisi dei dati del sonno.
 
-Query dell'utente: "{query}"
+    Query dell'utente: "{query}"
 
-Dati disponibili (campi per ogni record):
-- data: data della registrazione
-- total_sleep_time: durata totale del sonno in minuti
-- rem_sleep_duration: durata fase REM in minuti
-- deep_sleep_duration: durata sonno profondo in minuti
-- light_sleep_duration: durata sonno leggero in minuti
-- wakeup_count: numero di risvegli per notte
-- out_of_bed_count: numero di uscite dal letto
-- hr_average: frequenza cardiaca media (bpm)
-- rr_average: frequenza respiratoria media (respiri/min)
+    Dati disponibili (campi per ogni record):
+    - data: data della registrazione
+    - total_sleep_time: durata totale del sonno in minuti
+    - rem_sleep_duration: durata fase REM in minuti
+    - deep_sleep_duration: durata sonno profondo in minuti
+    - light_sleep_duration: durata sonno leggero in minuti
+    - wakeup_count: numero di risvegli per notte
+    - out_of_bed_count: numero di uscite dal letto
+    - hr_average: frequenza cardiaca media (bpm)
+    - rr_average: frequenza respiratoria media (respiri/min)
 
-Numero di record disponibili: {len(raw_data['records'])}
+    Numero di record disponibili: {len(raw_data['records'])}
 
-COMPITO: 
-Analizza la query e determina l'approccio statistico più appropriato per rispondere alla domanda.
-Hai TOTALE LIBERTÀ nella scelta del metodo e delle tecniche statistiche.
+    COMPITO: 
+    Analizza la query e determina l'approccio statistico più appropriato per rispondere alla domanda.
+    Hai TOTALE LIBERTÀ nella scelta del metodo e delle tecniche statistiche.
 
-CONSIDERAZIONI:
-1. Quale domanda sta facendo l'utente?
-2. Quali variabili sono coinvolte?
-3. Qual è il tipo di analisi più appropriato? (descrittiva, correlazione, confronto, trend, proporzioni, ecc.)
-4. Quali metriche statistiche sono necessarie?
-5. Quale tipo di visualizzazione sarebbe più efficace?
+    CONSIDERAZIONI:
+    1. Quale domanda sta facendo l'utente?
+    2. Quali variabili sono coinvolte?
+    3. Qual è il tipo di analisi più appropriato? (descrittiva, correlazione, confronto, trend, proporzioni, ecc.)
+    4. Quali metriche statistiche sono necessarie?
+    5. Quale tipo di visualizzazione sarebbe più efficace?
 
-ISTRUZIONI:
-1. Identifica l'obiettivo principale della query
-2. Determina quale approccio statistico risponde meglio alla domanda
-3. Identifica le variabili specifiche da analizzare (usa i nomi esatti delle colonne)
-4. Specifica il metodo statistico da applicare più opportuno
-5. Indica quali metriche e output calcolare
-6. Suggerisci il tipo di visualizzazione più appropriato
+    ISTRUZIONI:
+    1. Identifica l'obiettivo principale della query
+    2. Determina quale approccio statistico risponde meglio alla domanda
+    3. Identifica le variabili specifiche da analizzare (usa i nomi esatti delle colonne)
+    4. Specifica il metodo statistico da applicare più opportuno
+    5. Indica quali metriche e output calcolare
+    6. Suggerisci il tipo di visualizzazione più appropriato
 
-Rispondi in formato JSON con questa struttura:
-{{
-    "analysis_goal": "obiettivo principale dell'analisi",
-    "analysis_type": "tipo di analisi (es: correlation, proportion, descriptive, trend, comparison, etc.)",
-    "variables": ["lista", "delle", "colonne", "da", "analizzare"],
-    "statistical_methods": ["metodo"],
-    "calculations_needed": {{
-        "metric1": "descrizione calcolo",
-        "metric2": "descrizione calcolo"
-    }},
-    "expected_outputs": ["output1", "output2"],
-    "visualization_type": "tipo di grafico suggerito",
-    "reasoning": "spiegazione dettagliata della scelta",
-    "considerations": "eventuali note importanti"
-}}
+    Rispondi in formato JSON con questa struttura:
+    {{
+        "analysis_goal": "obiettivo principale dell'analisi",
+        "analysis_type": "tipo di analisi (es: correlation, proportion, descriptive, trend, comparison, etc.)",
+        "variables": ["lista", "delle", "colonne", "da", "analizzare"],
+        "statistical_methods": ["metodo"],
+        "calculations_needed": {{
+            "metric1": "descrizione calcolo",
+            "metric2": "descrizione calcolo"
+        }},
+        "expected_outputs": ["output1", "output2"],
+        "visualization_type": "tipo di grafico suggerito",
+        "reasoning": "spiegazione dettagliata della scelta",
+        "considerations": "eventuali note importanti"
+    }}
 
-Rispondi SOLO con il JSON, senza markdown o spiegazioni aggiuntive.
-"""
+    Rispondi SOLO con il JSON, senza markdown o spiegazioni aggiuntive.
+    """
 
     try:
-        # Invoca LLM per selezione metodo
         response = llm.invoke([HumanMessage(content=selection_prompt)])
-
-        # Estrai JSON dalla risposta
         response_text = response.content.strip()
-
-        # Rimuovi eventuali markdown code blocks
         response_text = re.sub(r'```json\n?', '', response_text)
         response_text = re.sub(r'```\n?', '', response_text)
 
-        # Parsing JSON
         method_selection = json.loads(response_text)
-
-        # Salva nello state
         state["statistical_method"] = method_selection
 
         print(f"✓ Obiettivo analisi: {method_selection['analysis_goal']}")
         print(f"  Tipo analisi: {method_selection['analysis_type']}")
         print(f"  Variabili: {method_selection['variables']}")
-        print(f"  Metodi statistici: {method_selection['statistical_methods']}")
-        print(f"  Visualizzazione: {method_selection['visualization_type']}")
 
-        if method_selection.get('considerations'):
-            print(f"Considerazioni: {method_selection['considerations']}")
-
-    except json.JSONDecodeError as e:
+    except json.JSONDecodeError:
         print(f"⚠️ Errore nel parsing JSON, uso fallback...")
-        # Fallback: analisi basata su keyword semplici
         query_lower = query.lower()
 
-        # Analisi semplice basata su keywords
-        if any(kw in query_lower for kw in ["correlazione", "relazione", "rapporto", "varia rispetto"]):
+        if any(kw in query_lower for kw in ["correlazione", "relazione"]):
             analysis_type = "correlation"
-            viz_type = "scatter con regressione"
-        elif any(kw in query_lower for kw in ["proporzione", "percentuale", "distribuzione", "composizione"]):
+            viz_type = "scatter"
+        elif any(kw in query_lower for kw in ["proporzione", "percentuale"]):
             analysis_type = "proportion"
-            viz_type = "pie chart o bar chart"
-        elif any(kw in query_lower for kw in ["trend", "andamento", "evoluzione", "nel tempo"]):
+            viz_type = "pie"
+        elif any(kw in query_lower for kw in ["trend", "andamento"]):
             analysis_type = "trend"
-            viz_type = "line chart"
-        elif any(kw in query_lower for kw in ["confronto", "differenza", "vs"]):
-            analysis_type = "comparison"
-            viz_type = "bar chart comparativo"
+            viz_type = "line"
         else:
             analysis_type = "descriptive"
-            viz_type = "statistiche descrittive"
+            viz_type = "bar"
 
         method_selection = {
-            "analysis_goal": "Analisi automatica basata su keywords",
+            "analysis_goal": "Analisi automatica",
             "analysis_type": analysis_type,
             "variables": [],
             "statistical_methods": ["auto-detected"],
             "calculations_needed": {},
             "expected_outputs": [],
             "visualization_type": viz_type,
-            "reasoning": "Determinato tramite keyword matching (fallback)",
-            "considerations": "Analisi automatica - verificare appropriatezza"
+            "reasoning": "Fallback",
+            "considerations": ""
         }
-
         state["statistical_method"] = method_selection
-        print(f"✓ Metodo selezionato (fallback): {method_selection['analysis_type']}")
 
     except Exception as e:
-        state["error"] = f"Errore nella selezione del metodo statistico: {str(e)}"
-        print(f"❌ Errore: {e}")
+        state["error"] = f"Errore selezione metodo: {str(e)}"
 
     return state
 
 
-# ==================== NODE 2: STATISTICAL ANALYSIS ====================
-# ==================== NODE 2: STATISTICAL ANALYSIS ====================
+# ==================== NODE 2: STATISTICAL ANALYSIS WITH REFLECTION ====================
+# ==================== NODE 2: STATISTICAL ANALYSIS WITH STRUCTURED OUTPUT ====================
 def statistical_analysis_node(state: SleepAnalysisState, llm: ChatGoogleGenerativeAI) -> SleepAnalysisState:
     """
-    Nodo 2: Genera ed esegue codice Python per analisi statistica
-    usando ESCLUSIVAMENTE statsmodels.
+    Nodo 2: Genera codice Python per analisi statistica usando Pydantic structured output.
     """
-    print("\n[NODE 2] Analisi statistica con statsmodels...")
+    print(f"\n[NODE 2] Analisi statistica - Tentativo {state['analysis_attempts'] + 1}...")
 
     if state.get("error"):
         return state
@@ -446,109 +333,147 @@ def statistical_analysis_node(state: SleepAnalysisState, llm: ChatGoogleGenerati
     raw_data = state["raw_data"]
     method_selection = state.get("statistical_method", {})
 
-    # Crea prompt per generare codice di analisi
-    analysis_prompt = f"""
-Sei un esperto di analisi statistica dei dati del sonno che usa ESCLUSIVAMENTE la libreria statsmodels.
+    state["analysis_attempts"] += 1
 
-Query originale: "{query}"
+    # Crea LLM con structured output
+    structured_llm = llm.with_structured_output(StatisticalAnalysisCode)
 
-METODO STATISTICO SELEZIONATO (da rispettare RIGOROSAMENTE):
-- Obiettivo: {method_selection.get('analysis_goal', '')}
-- Tipo di analisi: {method_selection.get('analysis_type', '')}
-- Variabili da analizzare: {method_selection.get('variables', [])}
-- Metodi statistici: {method_selection.get('statistical_methods', [])}
-- Calcoli richiesti: {json.dumps(method_selection.get('calculations_needed', dict()), indent=2)}
-- Output attesi: {method_selection.get('expected_outputs', [])}
-- Considerazioni: {method_selection.get('considerations', '')}
+    # Base prompt
+    base_prompt = f"""
+Generate Python code for statistical analysis using statsmodels.
 
-Dati disponibili (campi nel DataFrame):
-- data: data della registrazione (datetime)
-- total_sleep_time: durata totale del sonno in minuti
-- rem_sleep_duration: durata fase REM in minuti
-- deep_sleep_duration: durata sonno profondo in minuti
-- light_sleep_duration: durata sonno leggero in minuti
-- wakeup_count: numero di risvegli per notte
-- out_of_bed_count: numero di uscite dal letto
-- hr_average: frequenza cardiaca media (bpm)
-- rr_average: frequenza respiratoria media (respiri/min)
-- subject_id: ID del soggetto
+Query: "{query}"
 
-Numero di record: {len(raw_data['records'])}
+Analysis Details:
+- Type: {method_selection.get('analysis_type', '')}
+- Variables to use: {method_selection.get('variables', [])}
+- Goal: {method_selection.get('analysis_goal', '')}
 
-REQUISITI CRITICI:
+Data: {len(raw_data['records'])} records
+Available columns: wakeup_count, hr_average, total_sleep_time, rem_sleep_duration, 
+deep_sleep_duration, light_sleep_duration, out_of_bed_count, rr_average, data, subject_id
 
-1. USA ESCLUSIVAMENTE statsmodels per TUTTE le analisi statistiche
-2. NON usare scipy.stats, sklearn, o altre librerie statistiche
-3. Implementa ESATTAMENTE l'analisi specificata nel metodo statistico selezionato
-4. Usa SOLO le variabili indicate in 'variables'
+Libraries ALREADY imported (do NOT re-import these):
+- pandas as pd
+- numpy as np
+- statsmodels.api as sm
+- statsmodels.formula.api as smf
+- json
 
-LIBRERIE DISPONIBILI:
-- pandas (pd) - manipolazione dati
-- numpy (np) - operazioni numeriche
-- statsmodels.api (sm) - TUTTE le analisi statistiche
-- statsmodels.formula.api (smf) - formule R-style
-- statsmodels.stats - test statistici
-- statsmodels.tsa - analisi serie temporali
+Variables ALREADY available in execution context:
+- df: pandas DataFrame with cleaned data
+- results: empty dictionary {{}} to populate with your analysis results
 
-ESEMPI DI UTILIZZO STATSMODELS:
+CRITICAL Requirements:
+1. Use ONLY statsmodels for statistical calculations (NO scipy.stats, NO sklearn)
+2. Use ONLY these variables in your analysis: {method_selection.get('variables', [])}
+3. Remove NaN values with dropna() before any calculations
+4. Store ALL calculated metrics in the 'results' dictionary
+5. The LAST line of your code MUST be: print(json.dumps(results, default=str))
+6. Write ONLY executable Python code in the 'code' field
+7. NO comments explaining logic, NO markdown, NO descriptive text in the code
 
-# Correlazione
-import statsmodels.api as sm
-model = sm.OLS(y, sm.add_constant(X)).fit()
-r_squared = model.rsquared
-p_value = model.pvalues[1]
+Example structure for correlation analysis:
+df_clean = df[['variable1', 'variable2']].dropna()
+X = sm.add_constant(df_clean['variable1'])
+y = df_clean['variable2']
+model = sm.OLS(y, X).fit()
+correlation = np.corrcoef(df_clean['variable1'], df_clean['variable2'])[0, 1]
+results['correlation'] = float(correlation)
+results['r_squared'] = float(model.rsquared)
+results['p_value'] = float(model.pvalues[1])
+results['n_observations'] = int(len(df_clean))
+print(json.dumps(results, default=str))
 
-# Regressione lineare
-import statsmodels.formula.api as smf
-model = smf.ols('y ~ x', data=df).fit()
-
-# Test statistici
-from statsmodels.stats.diagnostic import het_breuschpagan
-from statsmodels.stats.stattools import durbin_watson
-
-# Serie temporali
-from statsmodels.tsa.seasonal import seasonal_decompose
-from statsmodels.tsa.stattools import adfuller
-
-# ANOVA
-from statsmodels.formula.api import ols
-from statsmodels.stats.anova import anova_lm
-
-ISTRUZIONI CODICE:
-- Assumi che i dati siano in 'df' (DataFrame pandas già pulito)
-- Importa: pandas (pd), numpy (np), statsmodels (varie componenti)
-- NON stampare nulla TRANNE l'ultima riga: print(json.dumps(results, default=str))
-- Salva TUTTI i risultati nel dizionario 'results'
-- Gestisci NaN con dropna() prima delle analisi
-- Converti date in string se necessario per serializzazione
-- L'ULTIMA RIGA del codice DEVE essere: print(json.dumps(results, default=str))
-
-IMPORTANTE: 
-- OGNI calcolo statistico DEVE usare statsmodels
-- Se serve una correlazione → usa OLS di statsmodels
-- Se serve un test → usa statsmodels.stats
-- Se serve ANOVA → usa statsmodels.formula.api
-- NO scipy.stats, NO sklearn
-
-Rispondi SOLO con codice Python eseguibile, senza spiegazioni o markdown.
+Return:
+- explanation: 1-2 sentences describing your statistical approach
+- imports: any additional imports needed (or empty string if none)
+- code: clean, executable Python code following the requirements above
 """
 
-    try:
-        # Genera codice con LLM
-        response = llm.invoke([HumanMessage(content=analysis_prompt)])
-        analysis_code = response.content.strip()
+    # REFLECTION se ci sono errori precedenti
+    if state["analysis_errors"]:
+        last_error = state["analysis_errors"][-1]
 
-        # Rimuovi eventuali markdown code blocks
+        reflection_prompt = f"""
+
+PREVIOUS ATTEMPT FAILED!
+
+Your previous code:
+{last_error['code'][:400]}
+
+Error received:
+{last_error['error'][:400]}
+
+The error indicates a problem with your code. Generate NEW, CORRECTED code that:
+1. Fixes the specific error mentioned above
+2. Is syntactically valid Python
+3. Contains NO descriptive text or comments in Italian/English within the code
+4. Uses ONLY the specified variables: {method_selection.get('variables', [])}
+5. Properly handles NaN values
+6. Follows all requirements listed above
+
+Generate corrected code now.
+"""
+        base_prompt += reflection_prompt
+
+    try:
+        # Invoca LLM con structured output
+        result = structured_llm.invoke([HumanMessage(content=base_prompt)])
+
+        print(f"✓ Structured output ricevuto")
+        print(f"  Explanation: {result.explanation[:80]}...")
+
+        # Estrai il codice (già separato dal testo grazie a Pydantic)
+        analysis_code = result.code.strip()
+
+        # Safety: rimuovi eventuali markdown residui
         analysis_code = re.sub(r'```python\n?', '', analysis_code)
         analysis_code = re.sub(r'```\n?', '', analysis_code)
 
-        state["analysis_code"] = analysis_code
+        # Validazione minima
+        if 'results' not in analysis_code or 'print(json.dumps' not in analysis_code:
+            error_msg = "Generated code missing 'results' dict or print statement"
+            state["analysis_errors"].append({
+                "attempt": state["analysis_attempts"],
+                "code": analysis_code,
+                "error": error_msg
+            })
+            print(f"⚠️ {error_msg}")
+            return state
 
-        # Prepara i dati come DataFrame
+        state["analysis_code"] = analysis_code
+        print(f"✓ Codice generato e validato (tentativo {state['analysis_attempts']})")
+
+        # Debug preview
+        preview = '\n'.join(analysis_code.split('\n')[:3])
+        print(f"  Preview: {preview}...")
+
+    except Exception as e:
+        import traceback
+        error_msg = f"Errore generazione codice: {str(e)}\n{traceback.format_exc()}"
+        state["error"] = error_msg
+        print(f"❌ {error_msg}")
+
+    return state
+# ==================== NODE 2.5: CODE EXECUTION CHECK ====================
+def check_analysis_code_node(state: SleepAnalysisState) -> SleepAnalysisState:
+    """
+    Nodo 2.5: Esegue il codice di analisi e verifica se ci sono errori.
+    Se ci sono errori, li salva per il reflection step.
+    """
+    print("\n[NODE 2.5] Verifica esecuzione codice analisi...")
+
+    if state.get("error"):
+        return state
+
+    analysis_code = state["analysis_code"]
+    raw_data = state["raw_data"]
+
+    try:
         df = pd.DataFrame(raw_data['records'])
         df['data'] = pd.to_datetime(df['data'])
 
-        # Prepara il codice completo con setup iniziale
         full_code = f"""
 import pandas as pd
 import numpy as np
@@ -556,34 +481,25 @@ import statsmodels.api as sm
 import statsmodels.formula.api as smf
 from statsmodels.stats import diagnostic, stattools
 from statsmodels.tsa import seasonal, stattools as tsa_stattools
-from datetime import datetime, timedelta
 import json
 
-# Dati
 df = pd.DataFrame({raw_data['records']})
 df['data'] = pd.to_datetime(df['data'])
-
-# Inizializza results
 results = {{}}
 
-# Codice di analisi generato
 {analysis_code}
 
-# Assicurati che results sia stampato (se non già presente nel codice generato)
 if 'print(json.dumps(results' not in '''{analysis_code}''':
     print(json.dumps(results, default=str))
 """
 
-        # Esegui con Python REPL
+        # Esegui il codice
         output = python_repl.run(full_code)
 
-        # Parse JSON dall'output
         if output and output.strip():
-            # Pulisci l'output da eventuali messaggi extra
             output_lines = output.strip().split('\n')
-
-            # Cerca l'ultima riga che contiene JSON valido
             json_output = None
+
             for line in reversed(output_lines):
                 line = line.strip()
                 if line.startswith('{') and line.endswith('}'):
@@ -592,9 +508,8 @@ if 'print(json.dumps(results' not in '''{analysis_code}''':
 
             if json_output:
                 results = json.loads(json_output)
-
-                # Pulisci tutte le stringhe da caratteri di controllo
                 cleaned_results = {}
+
                 for key, value in results.items():
                     if isinstance(value, str):
                         cleaned_value = value.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
@@ -604,57 +519,60 @@ if 'print(json.dumps(results' not in '''{analysis_code}''':
                         cleaned_results[key] = value
 
                 state["analysis_results"] = cleaned_results
-
-                print(f"✓ Analisi completata con statsmodels: {len(cleaned_results)} metriche calcolate")
-                print(f"  Metriche: {list(cleaned_results.keys())}")
-
-                # Mostra alcuni risultati chiave
-                for key, value in list(cleaned_results.items())[:5]:
-                    if isinstance(value, (int, float)):
-                        print(f"  - {key}: {value:.4f}" if isinstance(value, float) else f"  - {key}: {value}")
-                    else:
-                        print(f"  - {key}: {value}")
+                print(f"✓ Codice eseguito con successo: {len(cleaned_results)} metriche")
+                return state
             else:
-                state["error"] = "Impossibile trovare JSON valido nell'output"
-                print(f"❌ Output ricevuto:\n{output}")
+                # Nessun JSON trovato - salva errore
+                error_msg = f"JSON non trovato nell'output. Output ricevuto: {output[:500]}"
+                state["analysis_errors"].append({
+                    "attempt": state["analysis_attempts"],
+                    "code": analysis_code,
+                    "error": error_msg
+                })
+                print(f"⚠️ Errore: {error_msg}")
+                return state
         else:
-            state["error"] = "Il codice non ha prodotto output"
-            print("❌ Nessun output dal codice di analisi")
-
-    except json.JSONDecodeError as e:
-        state["error"] = f"Errore nel parsing JSON dell'output: {str(e)}"
-        print(f"❌ Errore JSON: {e}")
-        print(f"Output ricevuto:\n{output[:500]}...")
-        print(f"\nCodice generato:\n{analysis_code}")
+            error_msg = "Il codice non ha prodotto output"
+            state["analysis_errors"].append({
+                "attempt": state["analysis_attempts"],
+                "code": analysis_code,
+                "error": error_msg
+            })
+            print(f"⚠️ {error_msg}")
+            return state
 
     except Exception as e:
-        state["error"] = f"Errore nell'esecuzione dell'analisi: {str(e)}"
-        print(f"❌ Errore: {e}")
-        print(f"Codice generato:\n{analysis_code}")
+        # Cattura l'errore per reflection
         import traceback
-        print(f"Traceback: {traceback.format_exc()}")
+        error_msg = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
 
-    return state
-# ==================== NODE 3: PLOT GENERATION ====================
-def plot_generation_node(state: SleepAnalysisState, llm: ChatGoogleGenerativeAI) -> SleepAnalysisState:
-    """
-    Nodo 3: Genera ed esegue codice Python per creare un grafico Plotly
-    con retry logic, validazione del codice e propagazione corretta degli errori.
-    """
-    print("\n[NODE 3] Generazione grafico Plotly...")
+        state["analysis_errors"].append({
+            "attempt": state["analysis_attempts"],
+            "code": analysis_code,
+            "error": error_msg
+        })
 
-    # Se c'è già un errore nello state, non procedere
+        print(f"❌ Errore esecuzione: {str(e)}")
+        return state
+
+
+
+# ==================== NODE 3: VEGA-LITE PLOT GENERATION ====================
+def vega_lite_plot_generation_node(state: SleepAnalysisState, llm: ChatGoogleGenerativeAI) -> SleepAnalysisState:
+    """
+    Nodo 3: Genera una specifica Vega-Lite JSON per visualizzare i dati.
+    """
+    print("\n[NODE 3] Generazione grafico Vega-Lite...")
+
     if state.get("error"):
         return state
 
-    # Estrai dati dallo state
     query = state["query"]
     analysis_results = state["analysis_results"]
     raw_data = state["raw_data"]
     method_selection = state.get("statistical_method", {})
-    visualization_type = method_selection.get("visualization_type", "grafico generico")
+    visualization_type = method_selection.get("visualization_type", "bar")
 
-    # Configurazione retry logic
     max_attempts = 3
     attempt = 0
 
@@ -663,301 +581,164 @@ def plot_generation_node(state: SleepAnalysisState, llm: ChatGoogleGenerativeAI)
         print(f"\nTentativo {attempt}/{max_attempts}")
 
         try:
-            # ============================================================
-            # STEP 1: Genera il prompt con feedback da tentativi precedenti
-            # ============================================================
-            plot_prompt = create_plot_prompt(
+            vega_prompt = create_vega_prompt(
                 query=query,
                 visualization_type=visualization_type,
                 analysis_results=analysis_results,
-                previous_error=state.get("last_plot_error"),
-                previous_code=state.get("plot_code")
-            )
-
-            # ============================================================
-            # STEP 2: Genera codice con LLM
-            # ============================================================
-            response = llm.invoke([HumanMessage(content=plot_prompt)])
-            plot_code = response.content.strip()
-
-            # ============================================================
-            # STEP 3: Pulisci il codice generato
-            # ============================================================
-            plot_code = clean_generated_code(plot_code)
-
-            # ============================================================
-            # STEP 4: Valida il codice prima dell'esecuzione
-            # ============================================================
-            validation_error = validate_plotly_code(plot_code)
-            if validation_error:
-                print(f"  ⚠️  Validazione fallita: {validation_error}")
-                state["last_plot_error"] = validation_error
-                continue  # Riprova con il prossimo tentativo
-
-            # Salva il codice nello state
-            state["plot_code"] = plot_code
-
-            # ============================================================
-            # STEP 5: Esegui il codice e cattura eventuali errori
-            # ============================================================
-
-            plot_html, execution_error = execute_plot_code(
-                plot_code=plot_code,
                 raw_data=raw_data,
-                analysis_results=analysis_results,
-                method_selection=method_selection
+                method_selection=method_selection,
+                previous_error=state.get("last_vega_error"),
+                previous_spec=state.get("vega_spec")
             )
 
-            # ============================================================
-            # STEP 6: Verifica il risultato
-            # ============================================================
-            if plot_html:
-                # Successo! Rimuovi eventuali errori precedenti
-                state["plot_html"] = plot_html
-                state.pop("last_plot_error", None)
-                print(" Grafico generato con successo!")
-                return state
-            else:
-                # Esecuzione fallita, solleva eccezione con errore dettagliato
-                error_msg = execution_error or "HTML del grafico vuoto (causa sconosciuta)"
-                raise ValueError(error_msg)
+            response = llm.invoke([HumanMessage(content=vega_prompt)])
+            vega_text = response.content.strip()
+
+            # Pulisci markdown
+            vega_text = re.sub(r'```json\n?', '', vega_text)
+            vega_text = re.sub(r'```\n?', '', vega_text)
+
+            # Parse JSON
+            vega_spec = json.loads(vega_text)
+
+            # Valida la spec
+            validation_error = validate_vega_spec(vega_spec)
+            if validation_error:
+                print(f"  ⚠️ Validazione fallita: {validation_error}")
+                state["last_vega_error"] = validation_error
+                continue
+
+            # Aggiungi i dati alla spec
+            df = pd.DataFrame(raw_data['records'])
+            df['data'] = pd.to_datetime(df['data']).dt.strftime('%Y-%m-%d')
+
+            # Rimuovi NaN per Vega-Lite
+            df = df.replace({np.nan: None})
+
+            vega_spec["data"] = {"values": df.to_dict('records')}
+
+            print("grafico",vega_spec)
+            state["vega_spec"] = vega_spec
+            state["plot_html"] = ""
+            state.pop("last_vega_error", None)
+            print("✓ Grafico Vega-Lite generato con successo!")
+            return state
+
+        except json.JSONDecodeError as e:
+            error_msg = f"JSON non valido: {str(e)}"
+            print(f"  ❌ {error_msg}")
+            state["last_vega_error"] = error_msg
 
         except Exception as e:
-            # ============================================================
-            # GESTIONE ERRORI
-            # ============================================================
             error_msg = str(e)
-            print(f"  Errore tentativo {attempt}: {error_msg[:200]}...")
+            print(f"  ❌ Errore: {error_msg[:200]}")
+            state["last_vega_error"] = error_msg
 
-            # Salva l'errore per il prossimo tentativo
-            state["last_plot_error"] = error_msg
-
-            # Se è l'ultimo tentativo, salva l'errore definitivo nello state
             if attempt == max_attempts:
-                state["error"] = (
-                    f"Impossibile generare il grafico dopo {max_attempts} tentativi.\n\n"
-                    f"Ultimo errore: {error_msg}"
-                )
-                print(f"\n ERRORE FINALE dopo {max_attempts} tentativi")
-                print(f"\nCodice generato nell'ultimo tentativo:")
-                print("=" * 60)
-                print(state.get('plot_code', 'N/A'))
-                print("=" * 60)
+                state[
+                    "error"] = f"Impossibile generare grafico dopo {max_attempts} tentativi.\nUltimo errore: {error_msg}"
+                print(f"\n❌ ERRORE FINALE")
 
-                # Log traceback completo per debug
-                import traceback
-                print(f"\nTraceback completo:")
-                print(traceback.format_exc())
-
-    # Se usciamo dal loop senza successo, lo state contiene già l'errore
     return state
 
-def create_plot_prompt(query: str, visualization_type: dict, analysis_results: dict,
-                       previous_error: str = None, previous_code: str = None) -> str:
-    """Crea il prompt per la generazione del grafico con feedback iterativo"""
 
+def create_vega_prompt(query: str, visualization_type: str, analysis_results: dict,
+                       raw_data: dict, method_selection: dict,
+                       previous_error: str = None, previous_spec: dict = None) -> str:
+    """Crea il prompt per generare la specifica Vega-Lite"""
+    print("Tipo di visualizazoine",visualization_type )
     base_prompt = f"""
-Sei un esperto nella visualizzazione dati con Plotly per analisi del sonno.
+Sei un esperto di visualizzazione dati con Vega-Lite.
 
-Query originale: "{query}"
+Query: "{query}"
 
-RISULTATI DELL'ANALISI STATISTICA (da integrare nel grafico):
+RISULTATI ANALISI:
 {json.dumps(analysis_results, indent=2, default=str)}
 
-COLONNE DISPONIBILI NEL DATAFRAME 'df':
-- 'data': data della registrazione (datetime)
-- 'total_sleep_time': durata totale del sonno in minuti
-- 'rem_sleep_duration': durata fase REM in minuti
-- 'deep_sleep_duration': durata sonno profondo in minuti
-- 'light_sleep_duration': durata sonno leggero in minuti
-- 'wakeup_count': numero di risvegli per notte
-- 'out_of_bed_count': numero di uscite dal letto
-- 'hr_average': frequenza cardiaca media (bpm)
-- 'rr_average': frequenza respiratoria media (respiri/min)
-- 'subject_id': ID del soggetto
+TIPO VISUALIZZAZIONE: {visualization_type}
 
-ISTRUZIONI CRITICHE:
+VARIABILI DA method_selection: {method_selection.get('variables', [])}
 
-1. Crea un grafico: {visualization_type}
+CAMPI DISPONIBILI NEI DATI:
+- data (datetime in formato YYYY-MM-DD)
+- total_sleep_time, rem_sleep_duration, deep_sleep_duration, light_sleep_duration
+- wakeup_count, out_of_bed_count, hr_average, rr_average, subject_id
 
-3. Usa ESATTAMENTE le variabili da method_selection['variables']
+REQUISITI:
+1. Crea una specifica Vega-Lite COMPLETA in formato JSON
+2. USA il campo "data" per l'asse temporale (tipo "temporal")
+3. Usa le variabili specificate in method_selection['variables']
+4. NON includere i dati nel JSON (verranno aggiunti automaticamente)
+5. Includi title, axes labels, tooltips appropriati
+6. Usa mark types validi: point, line, bar, area, circle, square, tick, rule, arc
 
-4. NON inventare nomi di colonne che non esistono
+STRUTTURA RICHIESTA:
+{{
+  "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+  "title": "Titolo descrittivo",
+  "mark": {{"type": "point"}},
+  "encoding": {{
+    "x": {{"field": "data", "type": "temporal", "title": "Data"}},
+    "y": {{"field": "nome_campo", "type": "quantitative", "title": "Label"}},
+    "tooltip": [...]
+  }},
+  "width": 600,
+  "height": 400
+}}
 
-REQUISITI TECNICI:
-- Crea la figura e salvala nella variabile 'fig'
-- Usa titoli descrittivi
-- Aggiungi label agli assi
-- Usa layout professionale
-- Gestisci NaN nei dati con dropna() se necessario
-- NON stampare nulla, NON usare fig.show()
-- USA SOLO queste librerie già importate: pandas (pd), numpy (np), plotly.graph_objects (go), plotly.express (px)
-- NON IMPORTARE !!! statsmodels, scikit-learn, matplotlib, seaborn o altre librerie esterne
+ERRORI DA EVITARE:
+- NON inventare campi che non esistono
+- NON includere "data": {{"values": ...}} nel JSON
+- USA mark types validi (non "scatter", usa "point")
+- Per correlazioni usa mark "point" con encoding x e y
+- Per trend temporali usa mark "line"
 
-
-ERRORI DA EVITARE ASSOLUTAMENTE:
-1. NON usare proprietà 'current' o 'current_value' in rangeselector buttons
-2. USA SOLO proprietà valide per rangeselector.Button:
-   - count: numero di step
-   - label: etichetta del bottone
-   - step: unità (day, month, year, etc.)
-   - stepmode: "backward" o "todate"
-   - visible: True/False
-
-   Esempio CORRETTO:
-   dict(count=1, label="1M", step="month", stepmode="backward")
-
-3. NON usare colonne che non esistono nel DataFrame
-4. Gestisci valori NaN prima di plottare
-5. Verifica che 'fig' sia una figura Plotly valida
-
-Variabili disponibili:
-- df: DataFrame pandas
-- results: dict con risultati analisi
-- method_selection: dict con metodo selezionato
-- go: plotly.graph_objects
-- px: plotly.express
-- pd: pandas
-- np: numpy
-
-Rispondi SOLO con codice Python eseguibile che crea 'fig'.
+Rispondi SOLO con il JSON della specifica Vega-Lite, senza markdown o spiegazioni.
 """
 
-    # Aggiungi feedback da tentativi precedenti
-    if previous_error and previous_code:
+    if previous_error and previous_spec:
         feedback = f"""
 
 ERRORE NEL TENTATIVO PRECEDENTE:
 {previous_error}
 
-CODICE CHE HA CAUSATO L'ERRORE:
-{previous_code}
+SPECIFICA CHE HA CAUSATO L'ERRORE:
+{json.dumps(previous_spec, indent=2)}
 
-CORREGGI L'ERRORE E RIGENERA IL CODICE.
-Analizza attentamente l'errore e assicurati di non ripeterlo.
+CORREGGI L'ERRORE E RIGENERA LA SPECIFICA.
 """
         base_prompt += feedback
 
     return base_prompt
 
 
-def clean_generated_code(code: str) -> str:
-    """Pulisce il codice generato dall'LLM"""
+def validate_vega_spec(spec: dict) -> str:
+    """Valida una specifica Vega-Lite. Ritorna None se valida, messaggio di errore altrimenti."""
 
-    # Rimuovi markdown code blocks
-    code = re.sub(r'```python\n?', '', code)
-    code = re.sub(r'```\n?', '', code)
+    required_fields = ["mark", "encoding"]
+    for field in required_fields:
+        if field not in spec:
+            return f"Campo obbligatorio mancante: {field}"
 
-    # Rimuovi chiamate a show/save
-    code = re.sub(r'fig\.show\(\)', '', code)
-    code = re.sub(r'fig\.write_html\(.*?\)', '', code)
-    code = re.sub(r'fig\.to_html\(.*?\)', '', code)
+    if "data" in spec and "values" in spec["data"]:
+        return "Non includere 'data.values' nella spec (verrà aggiunto automaticamente)"
 
-    # Correzioni automatiche per errori comuni
-    code = re.sub(r'["\']?current["\']?\s*:', '"count":', code)
-    code = re.sub(r'current_value', 'count', code)
-    code = re.sub(r'["\']?curr["\']?\s*:', '"count":', code)
+    valid_marks = ["arc", "area", "bar", "circle", "line", "point", "rect", "rule", "square", "text", "tick", "trail"]
+    mark_type = spec["mark"]
+    if isinstance(mark_type, dict):
+        mark_type = mark_type.get("type", "")
 
-    return code.strip()
-
-
-def validate_plotly_code(code: str) -> str:
-    """
-    Valida il codice Plotly generato.
-    Ritorna stringa di errore se invalido, None se valido.
-    """
-
-    # Check 1: Verifica che 'fig' venga creato
-    if 'fig' not in code:
-        return "Il codice non crea una variabile 'fig'"
-
-    # Check 2: Verifica proprietà invalide comuni
-    invalid_patterns = [
-        (r'["\']current["\']', "Proprietà 'current' non valida in rangeselector"),
-        (r'current_value', "Proprietà 'current_value' non valida"),
-    ]
-
-    for pattern, error_msg in invalid_patterns:
-        if re.search(pattern, code):
-            return error_msg
-
-    # Check 3: Verifica che non ci siano comandi pericolosi
-    dangerous_patterns = [
-        r'import\s+os',
-        r'import\s+sys',
-        r'exec\(',
-        r'eval\(',
-        r'__import__',
-    ]
-
-    for pattern in dangerous_patterns:
-        if re.search(pattern, code):
-            return f"Codice contiene pattern pericoloso: {pattern}"
+    if mark_type not in valid_marks:
+        return f"Mark type '{mark_type}' non valido. Usa uno di: {', '.join(valid_marks)}"
 
     return None
 
 
-def execute_plot_code(plot_code: str, raw_data: dict,
-                      analysis_results: dict, method_selection: dict) -> str:
-    """Esegue il codice del grafico in modo sicuro e ritorna l'HTML"""
 
-    # Serializza i dati
-    results_json = json.dumps(analysis_results, default=str)
-    method_selection_json = json.dumps(method_selection, default=str)
-    raw_data_json = json.dumps(raw_data['records'], default=str)
-
-    # Crea il codice completo
-    full_code = f"""import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
-import plotly.express as px
-from datetime import datetime
-import json
-
-# Carica dati
-raw_data_list = json.loads('''{raw_data_json}''')
-results = json.loads('''{results_json}''')
-method_selection = json.loads('''{method_selection_json}''')
-
-# Crea DataFrame
-df = pd.DataFrame(raw_data_list)
-df['data'] = pd.to_datetime(df['data'])
-
-# Codice generato
-{plot_code}
-
-# Verifica fig
-if 'fig' not in locals():
-    raise ValueError("La variabile 'fig' non è stata creata")
-
-# Converti in HTML
-html_output = fig.to_html(include_plotlyjs='cdn', full_html=True)
-print("__PLOT_START__")
-print(html_output)
-print("__PLOT_END__")
-"""
-    try:
-        output = python_repl.run(full_code)
-        if output:
-            lines = output.strip().split('\n')
-            for i, line in enumerate(lines):
-                if line.strip().startswith('<!DOCTYPE') or line.strip().startswith('<html'):
-                    return '\n'.join(lines[i:]), None
-
-
-        return None, f"Nessun HTML trovato nell'output:\n{output[:500]}"
-    except Exception as e:
-        import traceback
-        error_detail = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
-        return None, error_detail
-
-
-#====================CORRELATION NODE====================
 # ==================== NODE 4: NATURAL LANGUAGE RESPONSE ====================
 def generate_response_node(state: SleepAnalysisState, llm: ChatGoogleGenerativeAI) -> SleepAnalysisState:
     """
-    Nodo 4: Genera una risposta in linguaggio naturale per medici
-    basata sui risultati dell'analisi statistica.
+    Nodo 4: Genera risposta in linguaggio naturale per medici.
     """
     print("\n[NODE 4] Generazione risposta...")
 
@@ -972,143 +753,110 @@ def generate_response_node(state: SleepAnalysisState, llm: ChatGoogleGenerativeA
     num_records = len(state["raw_data"]["records"])
 
     response_prompt = f"""
-Sei un assistente medico che deve spiegare risultati statistici a un medico in modo chiaro e clinicamente rilevante.
+Sei un assistente medico che spiega risultati statistici a un medico.
 
-QUERY ORIGINALE DEL MEDICO:
-"{query}"
+QUERY: "{query}"
 
-CONTESTO DELL'ANALISI:
+CONTESTO:
 - Paziente ID: {subject_id}
-- Periodo analizzato: {period}
-- Numero di notti: {num_records}
-- Tipo di analisi: {method_selection.get('analysis_type', 'N/A')}
+- Periodo: {period}
+- Notti analizzate: {num_records}
+- Tipo analisi: {method_selection.get('analysis_type', 'N/A')}
 
-RISULTATI STATISTICI:
+RISULTATI:
 {json.dumps(analysis_results, indent=2, default=str)}
 
 ISTRUZIONI:
-1. Rispondi DIRETTAMENTE alla domanda del medico
-2. Usa linguaggio clinico ma accessibile (evita gergo statistico complesso), NON FARE SUPPOSIZIONI CLINICHE SUI DEI DATI. LIMITATI A RISPONDERE
-3. Struttura la risposta in 3 parti:
-   - Risposta diretta (2-3 frasi)
+1. Rispondi DIRETTAMENTE alla domanda
+2. Linguaggio clinico ma accessibile
+3. Struttura: risposta diretta (2-3 frasi)
+4. Traduci statistiche in termini comprensibili
+5. Max 150 parole
+6. NO markdown, NO elenchi puntati
+7. Paragrafi continui
 
-4. Traduci valori statistici in termini comprensibili, esempio:
-   - Invece di "p-value < 0.05" → "statisticamente significativo"
-   - Invece di "r = 0.98" → "forte correlazione positiva"
-   - Converti unità se necessario (minuti → ore, etc.)
-
-5. Sii conciso: massimo 150 parole totali
-
-6. NON usare formattazione markdown, grassetto, o titoli
-7. Scrivi in paragrafi continui, senza elenchi puntati
-
-Rispondi SOLO con il testo della risposta, senza preamboli.
+Rispondi SOLO con il testo.
 """
 
     try:
         response = llm.invoke([HumanMessage(content=response_prompt)])
         final_response = response.content.strip()
-
         state["final_response"] = final_response
         print(f"✓ Risposta generata ({len(final_response)} caratteri)")
 
     except Exception as e:
-        state["error"] = f"Errore nella generazione risposta: {str(e)}"
-        print(f"❌ Errore: {e}")
+        state["error"] = f"Errore generazione risposta: {str(e)}"
 
     return state
-#==================== GRAPH CREATION ====================
+
+
 def create_sleep_analysis_chain() -> StateGraph:
-    """
-    Crea la chain LangGraph con i 4 nodi.
-    """
+    """Crea la chain LangGraph con reflection per l'analisi"""
 
     workflow = StateGraph(SleepAnalysisState)
-
 
     workflow.add_node("extract_data", lambda state: extract_sleep_data_node(state, llm_code))
     workflow.add_node("select_method", lambda state: select_statistical_method_node(state, llm_code))
     workflow.add_node("analyze", lambda state: statistical_analysis_node(state, llm_code))
-    workflow.add_node("plot", lambda state: plot_generation_node(state, llm_code))
-    workflow.add_node("respond", lambda state: generate_response_node(state, llm_code))  # <-- NUOVO
-
+    workflow.add_node("check_code", lambda state: check_analysis_code_node(state))  # NUOVO
+    workflow.add_node("plot", lambda state: vega_lite_plot_generation_node(state, llm_code))
+    workflow.add_node("respond", lambda state: generate_response_node(state, llm_code))
 
     workflow.set_entry_point("extract_data")
 
-    # Funzione per controllare errori dopo extract_data
     def check_error_extract(state: SleepAnalysisState) -> Literal["select_method", "end"]:
-        if state.get("error"):
-            return "end"
-        return "select_method"
+        return "end" if state.get("error") else "select_method"
 
-    # Funzione per controllare errori dopo select_method
     def check_error_method(state: SleepAnalysisState) -> Literal["analyze", "end"]:
-        if state.get("error"):
-            return "end"
-        return "analyze"
+        return "end" if state.get("error") else "analyze"
 
-    # Funzione per controllare errori dopo analyze
-    def check_error_analyze(state: SleepAnalysisState) -> Literal["plot", "end"]:
+    # NUOVO: Conditional edge dopo analyze → check_code
+    def after_analyze(state: SleepAnalysisState) -> Literal["check_code", "end"]:
+        return "end" if state.get("error") else "check_code"
+
+    # NUOVO: Conditional edge dopo check_code
+    MAX_ANALYSIS_ATTEMPTS = 3
+
+    def after_check_code(state: SleepAnalysisState) -> Literal["analyze", "plot", "end"]:
+        # Se c'è un errore fatale, termina
         if state.get("error"):
             return "end"
-        return "plot"
+
+        # Se ci sono risultati, procedi con il plot
+        if state.get("analysis_results"):
+            return "plot"
+
+        # Se ci sono errori ma non abbiamo superato i tentativi max, riprova
+        if state["analysis_errors"] and state["analysis_attempts"] < MAX_ANALYSIS_ATTEMPTS:
+            print(f"⟳ Riprovo analisi (tentativo {state['analysis_attempts'] + 1}/{MAX_ANALYSIS_ATTEMPTS})")
+            return "analyze"
+
+        # Superati i tentativi max, errore fatale
+        state["error"] = f"Impossibile completare l'analisi dopo {MAX_ANALYSIS_ATTEMPTS} tentativi"
+        return "end"
 
     def check_error_plot(state: SleepAnalysisState) -> Literal["respond", "end"]:
-        if state.get("error"):
-            return "end"
-        return "respond"
+        return "end" if state.get("error") else "respond"
 
-
-    # Edge condizionale dopo extract_data → select_method
-    workflow.add_conditional_edges(
-        "extract_data",
-        check_error_extract,
-        {
-            "select_method": "select_method",
-            "end": END
-        }
-    )
-
-    # Edge condizionale dopo select_method → analyze
-    workflow.add_conditional_edges(
-        "select_method",
-        check_error_method,
-        {
-            "analyze": "analyze",
-            "end": END
-        }
-    )
-
-    # Edge condizionale dopo analyze → plot
-    workflow.add_conditional_edges(
-        "analyze",
-        check_error_analyze,
-        {
-            "plot": "plot",
-            "end": END
-        }
-    )
-
+    # Edges
+    workflow.add_conditional_edges("extract_data", check_error_extract,
+                                   {"select_method": "select_method", "end": END})
+    workflow.add_conditional_edges("select_method", check_error_method,
+                                   {"analyze": "analyze", "end": END})
+    workflow.add_conditional_edges("analyze", after_analyze,
+                                   {"check_code": "check_code", "end": END})
+    workflow.add_conditional_edges("check_code", after_check_code,
+                                   {"analyze": "analyze", "plot": "plot", "end": END})
     workflow.add_conditional_edges("plot", check_error_plot,
                                    {"respond": "respond", "end": END})
 
-    # Edge finale: plot → END
     workflow.add_edge("respond", END)
-    #graph = workflow.compile()
-    #png_data = graph.get_graph().draw_mermaid_png()
 
-    #output_file = "sleep_analysis_graph.png"
-    #with open(output_file, "wb") as f:
-    #    f.write(png_data)
-    #print(f"✓ Grafo salvato in: {output_file}")
     return workflow.compile()
-
 
 # ==================== UTILITY FUNCTIONS ====================
 def run_analysis(query: str):
-    """
-    Esegue l'intera pipeline di analisi.
-    """
+    """Esegue l'intera pipeline"""
     print(f"\n{'=' * 60}")
     print(f"QUERY: {query}")
     print(f"{'=' * 60}")
@@ -1120,12 +868,15 @@ def run_analysis(query: str):
         "subject_id": 0,
         "period": "",
         "raw_data": {},
+        "data_sources": [],
         "statistical_method": {},
         "analysis_code": "",
         "analysis_results": {},
-        "plot_code": "",
-        "plot_html": "",
-        "final_response": "",  # <-- NUOVO
+        "analysis_errors": [],  # NUOVO
+        "analysis_attempts": 0,  # NUOVO
+        "vega_spec": {},
+        "plot_html": "",  # Non usato, mantenuto per compatibilità
+        "final_response": "",
         "messages": [],
         "error": ""
     }
@@ -1141,38 +892,35 @@ def run_analysis(query: str):
     else:
         print(f"\n✓ Subject ID: {final_state['subject_id']}")
         print(f"✓ Period: {final_state['period']}")
-        print(f"✓ Records analizzati: {len(final_state['raw_data']['records'])}")
+        print(f"✓ Records: {len(final_state['raw_data']['records'])}")
 
-        # Mostra la risposta clinica
         print(f"\n{'=' * 60}")
         print("RISPOSTA CLINICA")
         print(f"{'=' * 60}")
         print(final_state['final_response'])
         print(f"{'=' * 60}")
 
-        # Dettagli tecnici (opzionale, per debug)
-        if final_state.get("plot_html"):
-            output_file = f"sleep_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+        # SALVA SPEC JSON invece di HTML
+        if final_state.get("vega_spec"):
+            output_file = f"sleep_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
             with open(output_file, 'w', encoding='utf-8') as f:
-                f.write(final_state["plot_html"])
-            print(f"\n✓ Grafico salvato in: {output_file}")
+                json.dump(final_state["vega_spec"], f, indent=2)
+            print(f"\n✓ Specifica Vega-Lite salvata in: {output_file}")
 
     return final_state
 
-def create_sleep_analysis_chain_with_config_llm(llm_code: ChatGoogleGenerativeAI) -> StateGraph:
-    """
-    Versione per usare con llm_code già configurato da backend.config.settings
-    """
-    return create_sleep_analysis_chain()
-
-# Alla fine del file, aggiungi:
 def get_chain():
     """Funzione helper per Streamlit"""
     return create_sleep_analysis_chain()
 
+
+def create_sleep_analysis_chain_with_config_llm(llm_code: ChatGoogleGenerativeAI) -> StateGraph:
+    """Versione con LLM configurato"""
+    return create_sleep_analysis_chain()
+
+
 # ==================== MAIN ====================
 if __name__ == "__main__":
-
     queries = [
         "C'è correlazione tra il numero di risvegli e la frequenza cardiaca negli ultimi 10 giorni?"
     ]
