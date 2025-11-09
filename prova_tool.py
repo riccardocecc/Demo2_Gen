@@ -12,6 +12,8 @@ import re
 from langchain_experimental.tools import PythonREPLTool
 from langchain_experimental.utilities import PythonREPL
 
+from datacleaner import DataCleaner
+from domain_configs import SLEEP_CONFIG
 from settings import llm_code
 from tool import get_sleep_data
 
@@ -35,9 +37,9 @@ class SleepAnalysisState(TypedDict):
     statistical_method: dict
     analysis_code: str
     analysis_results: dict
-    analysis_errors: list  # NUOVO: storico errori
-    analysis_attempts: int  # NUOVO: contatore tentativi
-    vega_spec: dict  # CAMBIATO: dizionario Vega-Lite invece di codice
+    analysis_errors: list
+    analysis_attempts: int
+    vega_spec: dict
     plot_html: str
     messages: list
     error: str
@@ -56,6 +58,11 @@ class ErrorResult(TypedDict):
 
 
 SLEEP_DATA_PATH = 'sleep_data.csv'
+
+def process_sleep_data(result: dict, verbose: bool = True) -> pd.DataFrame:
+    """Pulisce i dati del sonno usando DataCleaner"""
+    cleaner = DataCleaner(SLEEP_CONFIG, verbose=verbose)
+    return cleaner.clean(result['records'])
 
 
 # ==================== NODE 1: DATA EXTRACTION ====================
@@ -82,9 +89,9 @@ def extract_sleep_data_node(state: SleepAnalysisState, llm: ChatGoogleGenerative
     """
 
     try:
-        response = llm_with_tools.invoke([HumanMessage(content=extraction_prompt)])
+            response = llm_with_tools.invoke([HumanMessage(content=extraction_prompt)])
 
-        if hasattr(response, 'tool_calls') and response.tool_calls:
+
             tool_call = response.tool_calls[0]
             subject_id = tool_call['args'].get('subject_id', 1)
             period = tool_call['args'].get('period', 'last_30_days')
@@ -100,96 +107,31 @@ def extract_sleep_data_node(state: SleepAnalysisState, llm: ChatGoogleGenerative
                 state["error"] = result['error']
                 return state
 
-            # Pulizia dati
-            df = pd.DataFrame(result['records'])
-            print(f"✓ Dati estratti: {len(df)} record")
-            print(f"  Pulizia dati in corso...")
+            # ====== REFACTORED: Usa DataCleaner invece di logica hardcoded ======
+            print(f"✓ Dati estratti: {len(result['records'])} record")
 
-            df['data'] = pd.to_datetime(df['data'], errors='coerce')
-            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-            if 'subject_id' in numeric_cols:
-                numeric_cols.remove('subject_id')
+            # Pulisci i dati usando la configurazione SLEEP_CONFIG
+            df_clean = process_sleep_data(result, verbose=True)
 
-            for col in numeric_cols:
-                df.loc[df[col] < 0, col] = np.nan
-                df[col] = df[col].replace([np.inf, -np.inf], np.nan)
+            # Verifica se ci sono dati dopo la pulizia
+            if df_clean.empty:
+                state["error"] = "Nessun dato valido dopo la pulizia"
+                return state
 
-            initial_rows = len(df)
-            df = df.dropna(subset=['data'])
-            if len(df) < initial_rows:
-                print(f"Rimosse {initial_rows - len(df)} righe con date mancanti")
+            df_clean['data'] = df_clean['data'].dt.strftime('%Y-%m-%d')
+            cleaned_records = df_clean.to_dict('records')
 
-            initial_rows = len(df)
-            df = df.drop_duplicates(subset=['data', 'subject_id'], keep='first')
-            if len(df) < initial_rows:
-                print(f"Rimosse {initial_rows - len(df)} righe duplicate")
+            #combinare più domini e inserirli in result['records']
 
-            df = df.sort_values('data').reset_index(drop=True)
 
-            outlier_cols = ['total_sleep_time', 'hr_average', 'rr_average', 'wakeup_count']
-            for col in outlier_cols:
-                if col in df.columns:
-                    Q1 = df[col].quantile(0.25)
-                    Q3 = df[col].quantile(0.75)
-                    IQR = Q3 - Q1
-                    lower_bound = Q1 - 3 * IQR
-                    upper_bound = Q3 + 3 * IQR
-                    outliers = ((df[col] < lower_bound) | (df[col] > upper_bound)).sum()
-                    if outliers > 0:
-                        print(f"  ⚠️ Rilevati {outliers} outliers in '{col}' (impostati a NaN)")
-                        df.loc[(df[col] < lower_bound) | (df[col] > upper_bound), col] = np.nan
-
-            print(f"✓ Pulizia completata: {len(df)} record validi")
-
-            df['data'] = df['data'].dt.strftime('%Y-%m-%d')
-            cleaned_records = df.to_dict('records')
             result['records'] = cleaned_records
-
             state["subject_id"] = subject_id
             state["period"] = period
             state["raw_data"] = result
 
             print(f"✓ Dati pronti per l'analisi: {len(result['records'])} record puliti")
 
-        else:
-            print("⚠️ LLM non ha chiamato il tool, uso fallback con regex...")
-            subject_id = 1
-            period = "last_30_days"
 
-            subject_match = re.search(r'soggetto[:\s]+(\d+)|subject[:\s]+(\d+)|id[:\s]+(\d+)', query, re.IGNORECASE)
-            if subject_match:
-                subject_id = int([g for g in subject_match.groups() if g][0])
-
-            if 'ultimi' in query.lower() or 'last' in query.lower():
-                days_match = re.search(r'(\d+)\s*giorni|(\d+)\s*days', query, re.IGNORECASE)
-                if days_match:
-                    days = int([g for g in days_match.groups() if g][0])
-                    period = f"last_{days}_days"
-            elif re.search(r'\d{4}-\d{2}-\d{2}', query):
-                dates = re.findall(r'\d{4}-\d{2}-\d{2}', query)
-                if len(dates) >= 2:
-                    period = f"{dates[0]},{dates[1]}"
-
-            result = get_sleep_data.invoke({
-                'subject_id': subject_id,
-                'period': period
-            })
-
-            if isinstance(result, dict) and 'error' in result:
-                state["error"] = result['error']
-                return state
-
-            # Stessa pulizia dati del branch precedente
-            df = pd.DataFrame(result['records'])
-            df['data'] = pd.to_datetime(df['data'], errors='coerce')
-            # ... (ripeti la pulizia come sopra)
-            df['data'] = df['data'].dt.strftime('%Y-%m-%d')
-            cleaned_records = df.to_dict('records')
-            result['records'] = cleaned_records
-
-            state["subject_id"] = subject_id
-            state["period"] = period
-            state["raw_data"] = result
 
     except Exception as e:
         state["error"] = f"Errore nell'estrazione dati: {str(e)}"
@@ -439,7 +381,7 @@ Generate corrected code now.
                 "code": analysis_code,
                 "error": error_msg
             })
-            print(f"⚠️ {error_msg}")
+            print(f" {error_msg}")
             return state
 
         state["analysis_code"] = analysis_code
@@ -456,6 +398,8 @@ Generate corrected code now.
         print(f"❌ {error_msg}")
 
     return state
+
+
 # ==================== NODE 2.5: CODE EXECUTION CHECK ====================
 def check_analysis_code_node(state: SleepAnalysisState) -> SleepAnalysisState:
     """
@@ -554,7 +498,6 @@ if 'print(json.dumps(results' not in '''{analysis_code}''':
 
         print(f"❌ Errore esecuzione: {str(e)}")
         return state
-
 
 
 # ==================== NODE 3: VEGA-LITE PLOT GENERATION ====================
