@@ -44,7 +44,7 @@ class SleepDataExtractor:
 @domain_registry.register('sleep')
 class SleepDomainConfig(DomainConfig):
 
-    def get_available_columns(self) -> List[str]:
+    def get_available_columns(self) -> List[Dict[str, str]]:
         return [
             'data', 'total_sleep_time', 'rem_sleep_duration',
             'deep_sleep_duration', 'light_sleep_duration', 'wakeup_count',
@@ -59,7 +59,7 @@ class SleepDomainConfig(DomainConfig):
 class KitchenDomainConfig(DomainConfig):
     """Configurazione dominio Cucina"""
 
-    def get_available_columns(self) -> List[str]:
+    def get_available_columns(self) -> List[Dict[str, str]]:
         return [
             'timestamp_picco', 'temperatura_max', 'id_attivita',
             'start_time_attivita', 'end_time_attivita', 'durata_attivita_minuti',

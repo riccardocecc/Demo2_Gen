@@ -34,19 +34,19 @@ class PlotlyGraphCode(BaseModel):
     code: str = Field(description="Executable Python code that creates 'fig' plotly figure and ends with fig.to_json()")
 
 
-class AnalysisState(TypedDict):
+class SleepAnalysisState(TypedDict):
     """State che mantiene lo stato della conversazione attraverso i nodi"""
     query: str
     subject_id: int
     period: str
     raw_data: dict[str, any]
+    domains_detected: list[str]
     statistical_method: dict
     analysis_code: str
     analysis_results: dict
     analysis_imports: str
     analysis_errors: list
     analysis_attempts: int
-    domains_detected: list[str]
     plotly_figure: dict
     plot_attempts: int
     plot_errors: list
@@ -65,7 +65,7 @@ def process_kitchen_data(result: dict, verbose: bool = True) -> pd.DataFrame:
     return cleaner.clean(result['records'])
 
 # ==================== NODE 1: DATA EXTRACTION ====================
-def extract_sleep_data_node(state: AnalysisState, llm: ChatGoogleGenerativeAI) -> AnalysisState:
+def extract_sleep_data_node(state: SleepAnalysisState, llm: ChatGoogleGenerativeAI) -> SleepAnalysisState:
     """
     Nodo 1: Estrae i dati dal CSV usando la query in linguaggio naturale.
     """
@@ -114,12 +114,6 @@ def extract_sleep_data_node(state: AnalysisState, llm: ChatGoogleGenerativeAI) -
                 })
                 df_clean = process_kitchen_data(result, verbose=False)
                 df_clean['timestamp_picco'] = df_clean['timestamp_picco'].dt.strftime('%Y-%m-%d')
-                if 'start_time_attivita' in df_clean.columns:
-                    df_clean['start_time_attivita'] = df_clean['start_time_attivita'].dt.strftime('%H:%M:%S')
-
-                if 'end_time_attivita' in df_clean.columns:
-                    df_clean['end_time_attivita'] = df_clean['end_time_attivita'].dt.strftime('%H:%M:%S')
-
                 cleaned_records = df_clean.to_dict('records')
                 result_tool[tool['name']] = cleaned_records
                 domains_detected.append('kitchen')
@@ -132,7 +126,6 @@ def extract_sleep_data_node(state: AnalysisState, llm: ChatGoogleGenerativeAI) -
         state["raw_data"] = result_tool
         state["domains_detected"] = domains_detected
 
-        print(f"✓ Dati pronti per l'analisi: {len(result['records'])} record puliti")
 
     except Exception as e:
         state["error"] = f"Errore nell'estrazione dati: {str(e)}"
@@ -143,7 +136,7 @@ def extract_sleep_data_node(state: AnalysisState, llm: ChatGoogleGenerativeAI) -
 
 
 # ==================== NODE 1.5: STATISTICAL METHOD SELECTION ====================
-def select_statistical_method_node(state: AnalysisState, llm: ChatGoogleGenerativeAI) -> AnalysisState:
+def select_statistical_method_node(state: SleepAnalysisState, llm: ChatGoogleGenerativeAI) -> SleepAnalysisState:
     """
     Nodo 1.5: Analizza la query e determina quale analisi statistica è più appropriata.
     """
@@ -151,21 +144,19 @@ def select_statistical_method_node(state: AnalysisState, llm: ChatGoogleGenerati
 
     if state.get("error"):
         return state
-
-    query = state["query"]
     domains_detected = state.get("domains_detected", [])
     available_columns = domain_registry.get_available_columns_for_domains(domains_detected)
-    print(f"✓ Colonne disponibili per i domini {domains_detected}: {available_columns}")
+    query = state["query"]
+
+    print("Numero di record disponibili:", len(available_columns))
 
     selection_prompt = f"""
-    Sei un esperto statistico specializzato nell'analisi dei dati sonno e cucina.
+    Sei un esperto statistico specializzato nell'analisi dei dati.
 
     Query dell'utente: "{query}"
 
     Dati disponibili (campi per ogni record):
-    {available_columns}
-
-    Numero di record disponibili: {len(available_columns)}
+        {available_columns}
 
     COMPITO: 
     Analizza la query e determina l'approccio statistico più appropriato per rispondere alla domanda.
@@ -213,7 +204,9 @@ def select_statistical_method_node(state: AnalysisState, llm: ChatGoogleGenerati
         method_selection = json.loads(response_text)
         state["statistical_method"] = method_selection
 
-        print("statistical",state["statistical_method"])
+        print(f"✓ Obiettivo analisi: {method_selection['analysis_goal']}")
+        print(f"  Tipo analisi: {method_selection['analysis_type']}")
+        print(f"  Variabili: {method_selection['variables']}")
 
     except json.JSONDecodeError:
         print(f"⚠️ Errore nel parsing JSON, uso fallback...")
@@ -251,7 +244,7 @@ def select_statistical_method_node(state: AnalysisState, llm: ChatGoogleGenerati
 
 
 # ==================== NODE 2: STATISTICAL ANALYSIS WITH REFLECTION ====================
-def statistical_analysis_node(state: AnalysisState, llm: ChatGoogleGenerativeAI) -> AnalysisState:
+def statistical_analysis_node(state: SleepAnalysisState, llm: ChatGoogleGenerativeAI) -> SleepAnalysisState:
     """
     Nodo 2: Genera codice Python per analisi statistica usando Pydantic structured output.
     """
@@ -259,17 +252,16 @@ def statistical_analysis_node(state: AnalysisState, llm: ChatGoogleGenerativeAI)
 
     if state.get("error"):
         return state
-
+    domains_detected = state.get("domains_detected", [])
+    available_columns = domain_registry.get_available_columns_for_domains(domains_detected)
     query = state["query"]
-    raw_data = state["raw_data"]
-    print("raw_data",raw_data)
     method_selection = state.get("statistical_method", {})
 
     state["analysis_attempts"] += 1
 
     # Crea LLM con structured output
     structured_llm = llm.with_structured_output(StatisticalAnalysisCode)
-    available_columns = domain_registry.get_available_columns_for_domains(state.get("domains_detected", []))
+
     # Base prompt
     base_prompt = f"""
 Generate Python code for statistical analysis using statsmodels.
@@ -280,7 +272,8 @@ Analysis Details:
 {method_selection}
 
 
-Available columns:{available_columns}
+Available columns
+{available_columns}
 
 Libraries ALREADY imported (do NOT re-import these):
 - pandas as pd
@@ -388,7 +381,7 @@ Generate corrected code now.
     return state
 
 
-def check_analysis_code_node(state: AnalysisState) -> AnalysisState:
+def check_analysis_code_node(state: SleepAnalysisState) -> SleepAnalysisState:
     """
     Nodo 2.5: Esegue il codice di analisi e verifica se ci sono errori.
     Se ci sono errori, li salva per il reflection step.
@@ -404,6 +397,21 @@ def check_analysis_code_node(state: AnalysisState) -> AnalysisState:
     custom_imports = state.get("analysis_imports", "")
 
     try:
+        # Prepara i dataframe in base alle chiavi presenti in raw_data
+        dataframes_setup = []
+        for key, records in raw_data.items():
+            df_name = key  # es. 'get_kitchen_data' o 'get_sleep_data'
+            dataframes_setup.append(f"{df_name} = pd.DataFrame({records})")
+
+            if records and len(records) > 0:
+                first_record = records[0]
+                # Cerca colonne di tipo Timestamp o con 'data', 'date', 'time' nel nome
+                for col in first_record.keys():
+                    if 'data' in col.lower() or 'date' in col.lower() or 'timestamp' in col.lower():
+                        dataframes_setup.append(f"{df_name}['{col}'] = pd.to_datetime({df_name}['{col}'])")
+
+        dataframes_code = '\n'.join(dataframes_setup)
+
         full_code = f"""
 import pandas as pd
 import numpy as np
@@ -413,8 +421,10 @@ from statsmodels.stats import diagnostic, stattools
 from statsmodels.tsa import seasonal, stattools as tsa_stattools
 import json
 {custom_imports}
-df = pd.DataFrame({raw_data['records']})
-df['data'] = pd.to_datetime(df['data'])
+
+# Crea i dataframe dai raw_data
+{dataframes_code}
+
 results = {{}}
 
 {analysis_code}
@@ -485,9 +495,8 @@ if 'print(json.dumps(results' not in '''{analysis_code}''':
         print(f"❌ Errore esecuzione: {str(e)}")
         return state
 
-
 # ==================== NODE 3: PLOTLY PLOT GENERATION ====================
-def plotly_plot_generation_node(state: AnalysisState, llm: ChatGoogleGenerativeAI) -> AnalysisState:
+def plotly_plot_generation_node(state: SleepAnalysisState, llm: ChatGoogleGenerativeAI) -> SleepAnalysisState:
     """
     Nodo 3: Genera codice Python per creare un grafico Plotly.
     """
@@ -499,31 +508,26 @@ def plotly_plot_generation_node(state: AnalysisState, llm: ChatGoogleGenerativeA
     query = state["query"]
     analysis_results = state["analysis_results"]
     raw_data = state["raw_data"]
-    domains_detected = state.get("domains_detected", [])
     method_selection = state.get("statistical_method", {})
     visualization_type = method_selection.get("visualization_type", "bar")
 
     state["plot_attempts"] = state.get("plot_attempts", 0) + 1
     MAX_PLOT_ATTEMPTS = 3
 
-    # PREPARAZIONE DEI DATI PER IL PROMPT
-    # Conta i record totali e costruisci descrizione dei domini
-    total_records = sum(len(data) for data in raw_data.values())
-
-    domains_info = []
-    for domain_name in domains_detected:
-        domain_config = domain_registry.get_domain(domain_name)
-        if domain_config:
-            tool_key = f'get_{domain_name}_data'
-            if tool_key in raw_data:
-                num_records = len(raw_data[tool_key])
-                columns = domain_config.get_available_columns()
-                domains_info.append(f"- {domain_name}: {num_records} records, colonne: {', '.join(columns)}")
-
-    domains_description = "\n".join(domains_info)
-
     # Crea LLM con structured output
     structured_llm = llm.with_structured_output(PlotlyGraphCode)
+
+    # Prepara informazioni sui dataframe disponibili
+    available_dataframes = {}
+    for key, records in raw_data.items():
+        if records and len(records) > 0:
+            columns = list(records[0].keys())
+            available_dataframes[key] = columns
+
+    dataframes_info = "\n".join([
+        f"- {df_name}: {len(raw_data[df_name])} records, columns: {', '.join(cols)}"
+        for df_name, cols in available_dataframes.items()
+    ])
 
     base_prompt = f"""
 Generate Python code to create a Plotly visualization.
@@ -536,10 +540,8 @@ Analysis Details:
 Analysis Results:
 {json.dumps(analysis_results, indent=2, default=str)}
 
-Domains and Data Available:
-{domains_description}
-
-Total records: {total_records}
+Available DataFrames:
+{dataframes_info}
 
 Suggested visualization type: {visualization_type}
 
@@ -551,15 +553,12 @@ Libraries ALREADY imported (do NOT re-import):
 - json
 
 Variables ALREADY available:
-- raw_data: dict with keys {list(raw_data.keys())}
-  Each key contains a list of records for that domain
-- df_sleep: pandas DataFrame with sleep data (if available)
-- df_kitchen: pandas DataFrame with kitchen data (if available)
+{', '.join([f'- {df_name}: pandas DataFrame' for df_name in available_dataframes.keys()])}
 - fig: None (you need to create the plotly figure)
 
 CRITICAL Requirements:
 1. Create a Plotly figure using plotly.graph_objects or plotly.express
-2. Use the appropriate DataFrame(s) based on domains involved
+2. Use the appropriate DataFrame ({', '.join(available_dataframes.keys())})
 3. Use ONLY the variables specified in the analysis: {method_selection.get('variables', [])}
 4. Handle NaN values appropriately (dropna() if needed)
 5. Store the figure in variable 'fig'
@@ -569,27 +568,35 @@ CRITICAL Requirements:
 9. Use professional color schemes
 10. NO comments in the code, ONLY executable Python
 
-Example for single domain (sleep):
-df_clean = df_sleep[['data', 'total_sleep_time']].dropna()
+Example for correlation (using get_sleep_data):
+df_clean = get_sleep_data[['total_sleep_time', 'hr_average']].dropna()
+fig = px.scatter(df_clean, x='total_sleep_time', y='hr_average', 
+                 trendline='ols', 
+                 title='Correlazione tra Sonno e Battito Cardiaco',
+                 labels={{'total_sleep_time': 'Durata Sonno (min)', 'hr_average': 'Battito Medio'}})
+fig.update_traces(marker=dict(size=8, opacity=0.7))
+print(fig.to_json())
+
+Example for time series (using get_sleep_data):
 fig = go.Figure()
-fig.add_trace(go.Scatter(x=df_clean['data'], y=df_clean['total_sleep_time'], 
+fig.add_trace(go.Scatter(x=get_sleep_data['data'], y=get_sleep_data['total_sleep_time'], 
                          mode='lines+markers', name='Sonno totale'))
 fig.update_layout(title='Andamento del sonno', 
                   xaxis_title='Data', 
                   yaxis_title='Durata (minuti)')
 print(fig.to_json())
 
-Example for cross-domain analysis:
-df_sleep_clean = df_sleep[['data', 'total_sleep_time']].dropna()
-df_kitchen_clean = df_kitchen[['timestamp_picco', 'durata_attivita_minuti']].dropna()
-df_kitchen_clean = df_kitchen_clean.rename(columns={{'timestamp_picco': 'data'}})
-df_kitchen_agg = df_kitchen_clean.groupby('data')['durata_attivita_minuti'].sum().reset_index()
-df_merged = pd.merge(df_sleep_clean, df_kitchen_agg, on='data', how='inner')
-fig = px.scatter(df_merged, x='durata_attivita_minuti', y='total_sleep_time',
-                 trendline='ols',
-                 title='Relazione tra Attività in Cucina e Sonno',
-                 labels={{'durata_attivita_minuti': 'Tempo in cucina (min)', 
-                         'total_sleep_time': 'Durata sonno (min)'}})
+Example combining both datasets:
+fig = go.Figure()
+fig.add_trace(go.Scatter(x=get_sleep_data['data'], y=get_sleep_data['total_sleep_time'],
+                         mode='lines+markers', name='Sonno'))
+fig.add_trace(go.Scatter(x=get_kitchen_data['timestamp_picco'], y=get_kitchen_data['temperatura_max'],
+                         mode='markers', name='Temperatura Cucina', yaxis='y2'))
+fig.update_layout(
+    title='Sonno vs Attività in Cucina',
+    yaxis=dict(title='Sonno (min)'),
+    yaxis2=dict(title='Temperatura (°C)', overlaying='y', side='right')
+)
 print(fig.to_json())
 
 Generate the code now.
@@ -610,9 +617,9 @@ Error received:
 
 Generate CORRECTED code that:
 1. Fixes the specific error
-2. Is valid Python syntax
-3. Creates a proper Plotly figure
-4. Uses the correct DataFrame names (df_sleep, df_kitchen)
+2. Uses the correct DataFrame names ({', '.join(available_dataframes.keys())})
+3. Is valid Python syntax
+4. Creates a proper Plotly figure
 5. Ends with print(fig.to_json())
 """
         base_prompt += reflection_prompt
@@ -644,20 +651,20 @@ Generate CORRECTED code that:
                 state["error"] = f"Impossibile generare grafico dopo {MAX_PLOT_ATTEMPTS} tentativi"
             return state
 
-        # PREPARA I DATAFRAMES PER L'ESECUZIONE
-        dataframe_setup = []
+        # Prepara i dataframe
+        dataframes_setup = []
+        for key, records in raw_data.items():
+            df_name = key
+            dataframes_setup.append(f"{df_name} = pd.DataFrame({records})")
 
-        if 'get_sleep_data' in raw_data:
-            dataframe_setup.append(f"""
-df_sleep = pd.DataFrame({raw_data['get_sleep_data']})
-df_sleep['data'] = pd.to_datetime(df_sleep['data'])
-""")
+            # Converti colonne temporali
+            if records and len(records) > 0:
+                first_record = records[0]
+                for col in first_record.keys():
+                    if 'data' in col.lower() or 'date' in col.lower() or 'timestamp' in col.lower():
+                        dataframes_setup.append(f"{df_name}['{col}'] = pd.to_datetime({df_name}['{col}'])")
 
-        if 'get_kitchen_data' in raw_data:
-            dataframe_setup.append(f"""
-df_kitchen = pd.DataFrame({raw_data['get_kitchen_data']})
-df_kitchen['timestamp_picco'] = pd.to_datetime(df_kitchen['timestamp_picco'])
-""")
+        dataframes_code = '\n'.join(dataframes_setup)
 
         full_code = f"""
 import pandas as pd
@@ -667,9 +674,7 @@ import plotly.express as px
 import json
 {result.imports}
 
-raw_data = {raw_data}
-
-{''.join(dataframe_setup)}
+{dataframes_code}
 
 fig = None
 
@@ -739,7 +744,7 @@ fig = None
     return state
 
 # ==================== NODE 4: NATURAL LANGUAGE RESPONSE ====================
-def generate_response_node(state: AnalysisState, llm: ChatGoogleGenerativeAI) -> AnalysisState:
+def generate_response_node(state: SleepAnalysisState, llm: ChatGoogleGenerativeAI) -> SleepAnalysisState:
     """
     Nodo 4: Genera risposta in linguaggio naturale per medici.
     """
@@ -797,7 +802,7 @@ Rispondi SOLO con il testo.
 def create_sleep_analysis_chain() -> StateGraph:
     """Crea la chain LangGraph con reflection per l'analisi"""
 
-    workflow = StateGraph(AnalysisState)
+    workflow = StateGraph(SleepAnalysisState)
 
     workflow.add_node("extract_data", lambda state: extract_sleep_data_node(state, llm_code))
     workflow.add_node("select_method", lambda state: select_statistical_method_node(state, llm_code))
@@ -808,18 +813,18 @@ def create_sleep_analysis_chain() -> StateGraph:
 
     workflow.set_entry_point("extract_data")
 
-    def check_error_extract(state: AnalysisState) -> Literal["select_method", "end"]:
+    def check_error_extract(state: SleepAnalysisState) -> Literal["select_method", "end"]:
         return "end" if state.get("error") else "select_method"
 
-    def check_error_method(state: AnalysisState) -> Literal["analyze", "end"]:
+    def check_error_method(state: SleepAnalysisState) -> Literal["analyze", "end"]:
         return "end" if state.get("error") else "analyze"
 
-    def after_analyze(state: AnalysisState) -> Literal["check_code", "end"]:
+    def after_analyze(state: SleepAnalysisState) -> Literal["check_code", "end"]:
         return "end" if state.get("error") else "check_code"
 
     MAX_ANALYSIS_ATTEMPTS = 3
 
-    def after_check_code(state: AnalysisState) -> Literal["analyze", "plot", "end"]:
+    def after_check_code(state: SleepAnalysisState) -> Literal["analyze", "plot", "end"]:
         if state.get("error"):
             return "end"
 
@@ -833,7 +838,7 @@ def create_sleep_analysis_chain() -> StateGraph:
         state["error"] = f"Impossibile completare l'analisi dopo {MAX_ANALYSIS_ATTEMPTS} tentativi"
         return "end"
 
-    def check_error_plot(state: AnalysisState) -> Literal["respond", "end"]:
+    def check_error_plot(state: SleepAnalysisState) -> Literal["respond", "end"]:
         return "end" if state.get("error") else "respond"
 
     workflow.add_conditional_edges("extract_data", check_error_extract,
@@ -926,7 +931,7 @@ def get_chain():
 # ==================== MAIN ====================
 if __name__ == "__main__":
     queries = [
-        "C'è correlazione tra il numero di risvegli e l'utilizzo della cucina per soggetto 2 negli utlmi 10 giorni"
+        "Numero di risvegli il soggetto 2 negli utlmi 10 giorni"
     ]
 
     for query in queries:
