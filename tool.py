@@ -3,16 +3,19 @@ from typing import Annotated, TypedDict
 
 import pandas as pd
 from langchain_core.tools import tool
+from pydantic import BaseModel
 
 from settings import SLEEP_DATA_PATH
 from type import SleepDataResult, ErrorResult, KitchenDataResult
 
+class ToolInput(BaseModel):
+    subject_id: Annotated[int, "ID of the subject to retrieve data for, integer"]
+    period: Annotated[str, "Period to retrieve in format 'YYYY-MM-DD,YYYY-MM-DD' or 'last_N_days' (e.g., 'last_30_days')"]
 
-@tool
+@tool(args_schema=ToolInput)
 def get_sleep_data(
-        subject_id: Annotated[int, "ID of the subject to retrieve data for, integer"],
-        period: Annotated[
-            str, "Period to retrieve in format 'YYYY-MM-DD,YYYY-MM-DD' or 'last_N_days' (e.g., 'last_30_days')"]
+        subject_id: int,
+        period: str
 ) -> SleepDataResult | ErrorResult:
     """
     Recupera i dati grezzi del sonno per un soggetto specifico in un periodo definito.
@@ -99,11 +102,10 @@ from settings import KITCHEN_DATA_PATH  # Assicurati di aggiungere questo in set
 
 
 
-@tool
+@tool(args_schema=ToolInput)
 def get_kitchen_data(
-        subject_id: Annotated[int, "ID of the subject to retrieve data for, integer"],
-        period: Annotated[
-            str, "Period to retrieve in format 'YYYY-MM-DD,YYYY-MM-DD' or 'last_N_days' (e.g., 'last_30_days')"]
+        subject_id: int,
+        period: str
 ) -> KitchenDataResult | ErrorResult:
     """
     Recupera i dati grezzi delle attività in cucina per un soggetto specifico in un periodo definito.

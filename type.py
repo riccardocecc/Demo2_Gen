@@ -47,3 +47,22 @@ class KitchenDataResult(TypedDict):
 
 class ErrorResult(TypedDict):
     error: str
+
+class SleepAnalysisState(TypedDict):
+    """State che mantiene lo stato della conversazione attraverso i nodi"""
+    query: str
+    subject_id: int
+    period: str
+    raw_data: dict[str, any]
+    domains_detected: list[str]
+    statistical_method: dict
+    analysis_code: str
+    analysis_results: dict
+    analysis_imports: str
+    analysis_errors: list
+    analysis_attempts: int
+    plotly_figure: dict
+    plot_attempts: int
+    plot_errors: list
+    error: str
+    final_response: str

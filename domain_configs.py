@@ -3,24 +3,21 @@ from datacleaner import DomainConfig
 
 
 SLEEP_CONFIG = DomainConfig(
-    name="Sonno",
-    date_columns=['data'],
-    primary_date_column='data',
-    numeric_exclude=[],
-    outlier_columns=['total_sleep_time', 'hr_average', 'rr_average', 'wakeup_count'],
-    duplicate_subset=['data', 'subject_id'],
-    outlier_iqr_multiplier=3.0
+    name="sleep",
+    date_columns=["data"],
+    primary_date_column="data",
+    date_only_columns=["data"],  # Solo data, no timestamp
+    outlier_columns=["total_sleep_time", "hr_average", "rr_average"]
 )
 
-
+# Configurazione per kitchen data
 KITCHEN_CONFIG = DomainConfig(
-    name="Cucina",
-    date_columns=['timestamp_picco', 'start_time_attivita', 'end_time_attivita'],
-    primary_date_column='timestamp_picco',
-    numeric_exclude=[],
-    outlier_columns=['temperatura_max', 'durata_attivita_minuti'],
-    duplicate_subset=['id_attivita', 'subject_id'],  # id_attivita è univoco
-    outlier_iqr_multiplier=3.0
+    name="kitchen",
+    date_columns=["timestamp_picco", "start_time_attivita", "end_time_attivita"],
+    primary_date_column="timestamp_picco",
+    date_only_columns=["timestamp_picco"],  # Solo data
+    time_columns=["start_time_attivita", "end_time_attivita"],  # Solo ora
+    outlier_columns=["temperatura_max", "durata_attivita_minuti"]
 )
 
 

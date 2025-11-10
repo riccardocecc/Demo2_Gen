@@ -15,6 +15,8 @@ class DomainConfig:
     outlier_columns: List[str] = None  # Colonne per rilevamento outliers
     duplicate_subset: List[str] = None  # Colonne per rilevare duplicati
     outlier_iqr_multiplier: float = 3.0  # Moltiplicatore IQR per outliers
+    time_columns: List[str] = None  # Colonne da formattare come solo ora (HH:MM:SS)
+    date_only_columns: List[str] = None  # Colonne da formattare come solo data (YYYY-MM-DD)
 
 
 class DataCleaner:
@@ -49,6 +51,8 @@ class DataCleaner:
         df = self._remove_duplicates(df)
         df = self._sort_data(df)
         df = self._handle_outliers(df)
+        df = self._format_datetime_columns(df)
+        df = self._remove_nan_values(df)
 
         if self.verbose:
             print(f"✓ Pulizia completata: {len(df)} record validi")
@@ -138,6 +142,35 @@ class DataCleaner:
                     self.cleaning_stats[col + '_outliers'] = 0
                 self.cleaning_stats[col + '_outliers'] += outliers
 
+        return df
+
+    def _format_datetime_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Formatta le colonne datetime secondo le specifiche"""
+        # Formatta colonne solo data (YYYY-MM-DD)
+        if self.config.date_only_columns:
+            for col in self.config.date_only_columns:
+                if col in df.columns and pd.api.types.is_datetime64_any_dtype(df[col]):
+                    df[col] = df[col].dt.strftime('%Y-%m-%d')
+
+        # Formatta colonne solo ora (HH:MM:SS)
+        if self.config.time_columns:
+            for col in self.config.time_columns:
+                if col in df.columns and pd.api.types.is_datetime64_any_dtype(df[col]):
+                    df[col] = df[col].dt.strftime('%H:%M:%S')
+
+        return df
+
+    def _remove_nan_values(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Rimuove tutte le celle con valori NaN sostituendole con None per una serializzazione JSON pulita"""
+        initial_nans = df.isna().sum().sum()
+
+        # Sostituisci NaN con None per una migliore serializzazione JSON
+        df = df.where(pd.notnull(df), None)
+
+        if initial_nans > 0 and self.verbose:
+            print(f"  Gestiti {initial_nans} valori NaN")
+
+        self.cleaning_stats['nan_values_handled'] = initial_nans
         return df
 
     def _print_summary(self, initial: int, final: int):

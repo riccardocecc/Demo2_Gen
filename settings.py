@@ -1,8 +1,12 @@
+import base64
+
 from dotenv import load_dotenv
 import os
 from pathlib import Path
 from google.api_core import exceptions
 import time
+
+from langchain_ollama import ChatOllama
 
 # Carica le variabili dal file .env
 load_dotenv()
@@ -13,6 +17,34 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 google_api_key = os.getenv("GOOGLE_API")
 mistral_api = os.getenv("MISTRAL")
 
+ollama_user=os.getenv("OLLAMA_USER")
+ollama_pwd=os.getenv("OLLAMA_PWD")
+credentials = f"{ollama_user}:{ollama_pwd}"
+base64_credentials = base64.b64encode(credentials.encode()).decode()
+
+client_oll = ChatOllama(
+    model='qwen3:32b',
+    base_url='https://lovelace.ewlab.di.unimi.it/ollama',
+    reasoning=False,
+    validate_model_on_init=True,
+    client_kwargs={
+            "headers": {
+                "Authorization": f"Basic {base64_credentials}"
+            }
+    }
+)
+
+oll_tool = ChatOllama(
+    model='qwen3:32b',
+    base_url='https://lovelace.ewlab.di.unimi.it/ollama',
+    reasoning=False,
+    validate_model_on_init=True,
+    client_kwargs={
+            "headers": {
+                "Authorization": f"Basic {base64_credentials}"
+            }
+    }
+)
 
 llm_graph_generator = ChatGoogleGenerativeAI(
     model="gemini-2.5-pro",
