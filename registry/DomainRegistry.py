@@ -112,7 +112,7 @@ class KitchenDomainConfig(DomainConfig):
     def get_columns_with_types(self) -> Dict[str, str]:
         """Restituisce le colonne con i loro tipi di dato"""
         return {
-            'timestamp_picco': 'datetime',
+            'timestamp_picco': 'date',
             'temperatura_max': 'float',
             'id_attivita': 'int',
             'start_time_attivita': 'time',

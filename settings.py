@@ -27,6 +27,7 @@ client_oll = ChatOllama(
     base_url='https://lovelace.ewlab.di.unimi.it/ollama',
     reasoning=False,
     validate_model_on_init=True,
+    num_predict=4096,
     client_kwargs={
             "headers": {
                 "Authorization": f"Basic {base64_credentials}"

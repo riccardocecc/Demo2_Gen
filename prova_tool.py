@@ -138,7 +138,7 @@ def extract_sleep_data_node(state: State) -> State:
                     })
                     # Pulisci i dati
                     df_clean = process_kitchen_data(result, verbose=False)
-
+                    print(df_clean)
                     # Converti in dizionario SENZA valori None/NaN
                     cleaned_records = df_clean.replace({np.nan: None}).to_dict('records')
                     # Rimuovi le chiavi con valore None

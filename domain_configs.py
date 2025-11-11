@@ -12,12 +12,15 @@ SLEEP_CONFIG = DomainConfig(
 
 # Configurazione per kitchen data
 KITCHEN_CONFIG = DomainConfig(
-    name="kitchen",
-    date_columns=["timestamp_picco", "start_time_attivita", "end_time_attivita"],
-    primary_date_column="timestamp_picco",
-    date_only_columns=["timestamp_picco"],  # Solo data
-    time_columns=["start_time_attivita", "end_time_attivita"],  # Solo ora
-    outlier_columns=["temperatura_max", "durata_attivita_minuti"]
+    name="Cucina",
+    date_columns=['timestamp_picco', 'start_time_attivita', 'end_time_attivita'],
+    primary_date_column='timestamp_picco',
+    numeric_exclude=['id_attivita', 'subject_id'],
+    outlier_columns=['temperatura_max', 'durata_attivita_minuti'],
+    duplicate_subset=['timestamp_picco', 'subject_id'],
+    outlier_iqr_multiplier=3.0,
+    date_only_columns=['timestamp_picco'],
+    time_columns=['start_time_attivita', 'end_time_attivita']
 )
 
 
