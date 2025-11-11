@@ -439,6 +439,7 @@ def check_stats_code(state: State) -> State:
 # ==================== NODE 3: GRAPH Generator ====================
 def plot_generator(state:State) -> State:
     code_result_str = json.dumps(state.get("code_response"), indent=2).replace('{', '{{').replace('}', '}}')
+    statistical_method_str = str(state["statistical_method"]).replace('{', '{{').replace('}', '}}')
     available_columns_by_df = domain_registry.get_available_columns_for_domains(state["domains_detected"])
     available_colums = chr(10).join(f"- {df_name}: {', '.join(f'{col} ({dtype})' for col, dtype in columns.items())}" for df_name, columns in available_columns_by_df.items())
 
@@ -454,7 +455,7 @@ def plot_generator(state:State) -> State:
     context = f""" 
     Crea un grafico plotly che risponda alla domanda dell'utente: {query_user}
     Hai a disposizione queste colonne {available_colums}
-    considera che è stata fatta questa analisi statistica: {state["statistical_method"]}
+    considera che è stata fatta questa analisi statistica: {statistical_method_str}
 
     questo è il risultato:
     {code_result_str}
@@ -686,7 +687,7 @@ if __name__ == "__main__":
     app = create_sleep_analysis_graph()
 
     result = app.invoke({
-        "query": "C'è qualche correlazione tra il numero di risvegli e l'utilizzo della cucina per il soggetto 2 negli ultimi 10 giorni?",
+        "query": "C'è qualche correlazione tra il numero di risvegli e le ore di sonno dormite per il soggetto 2 negli ultimi 10 giorni?",
         "messages": [],
         "iterations": 0
     })

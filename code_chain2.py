@@ -31,11 +31,11 @@ You MUST invoke the provided tool named `code` to return your answer.
 DO NOT write natural language explanations outside the tool.  
 Your response MUST be a valid JSON matching this schema:
 
-{{
+{{{{
   "description": "short explanation of the code purpose",
   "imports": "code block with import statements",
   "code": "code block implementing the solution (without imports). Store the final result in a variable named '{result_var}' {result_format}."
-}}
+}}}}
 
 Ensure that the code you provide is executable, with all required imports, data definitions, and dependencies included."""
 
@@ -50,8 +50,6 @@ Ensure that the code you provide is executable, with all required imports, data 
             ("placeholder", "{messages}"),
         ]
     )
-
-
 structured_llm = llm_code.with_structured_output(code, include_raw=True)
 
 
