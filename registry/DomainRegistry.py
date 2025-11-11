@@ -77,9 +77,8 @@ class SleepDomainConfig(DomainConfig):
         ]
 
     def get_columns_with_types(self) -> Dict[str, str]:
-        """Restituisce le colonne con i loro tipi di dato"""
         return {
-            'data': 'datetime',
+            'data': 'str',  # Solo data, non datetime
             'total_sleep_time': 'float',
             'rem_sleep_duration': 'float',
             'deep_sleep_duration': 'float',
@@ -110,13 +109,12 @@ class KitchenDomainConfig(DomainConfig):
         ]
 
     def get_columns_with_types(self) -> Dict[str, str]:
-        """Restituisce le colonne con i loro tipi di dato"""
         return {
-            'timestamp_picco': 'date',
+            'timestamp_picco': 'str',  # Convertito in solo data per merge con sleep
             'temperatura_max': 'float',
             'id_attivita': 'int',
-            'start_time_attivita': 'time',
-            'end_time_attivita': 'time',
+            'start_time_attivita': 'time',  # Solo ora
+            'end_time_attivita': 'time',  # Solo ora
             'durata_attivita_minuti': 'float',
             'fascia_oraria': 'string',
             'subject_id': 'int'

@@ -1,41 +1,44 @@
 from pydantic import BaseModel, Field
 from langchain_core.prompts import ChatPromptTemplate
-from typing import  Optional
+from typing import Optional
 from settings import llm_code
 
 class code(BaseModel):
     description: str = Field(description="Brevissima descrizone del codice")
     imports: str = Field(description="Code block import statements")
-    code: str = Field(
-        description="Code block not include import statements. Store results in a global variable named 'result' as a dictionary")
+    code: str = Field(description="Code block not include import statements")
 
 
-def create_code_gen_prompt(context: Optional[str] = None):
+def create_code_gen_prompt(
+    context: Optional[str] = None,
+    result_var: str = "result",
+    result_format: str = "as a dictionary"
+):
     """
     Crea un prompt per la generazione di codice con contesto opzionale.
 
     Args:
-        context: Contesto aggiuntivo da includere nel prompt (es. schema del DataFrame, variabili disponibili, ecc.)
+        context: Contesto aggiuntivo da includere nel prompt
+        result_var: Nome della variabile in cui salvare il risultato (default: 'result')
+        result_format: Formato del risultato (default: 'as a dictionary')
 
     Returns:
         ChatPromptTemplate configurato
     """
-    base_instructions = """/no thinking <instructions>  
-You are a coding assistant with expertise in Python for statistical analysis.  
+    base_instructions = f"""/no thinking <instructions>  
+You are a coding assistant with expertise in Python.  
 You MUST invoke the provided tool named `code` to return your answer.  
 DO NOT write natural language explanations outside the tool.  
 Your response MUST be a valid JSON matching this schema:
 
-You do NOT need to import or create it. Just use it directly in your code.
 {{
   "description": "short explanation of the code purpose",
   "imports": "code block with import statements",
-  "code": "code block implementing the solution (without imports). Store the final result in a global variable named 'result' as a dictionary."
+  "code": "code block implementing the solution (without imports). Store the final result in a variable named '{result_var}' {result_format}."
 }}
 
 Ensure that the code you provide is executable, with all required imports, data definitions, and dependencies included."""
 
-    # Aggiungi il contesto se fornito
     if context:
         system_message = f"{base_instructions}\n\n<context>\n{context}\n</context>\n\nHere is the user question:"
     else:
@@ -77,21 +80,26 @@ def check_llm_output(tool_output):
     return tool_output
 
 
-def create_code_chain(context: Optional[str] = None):
+def create_code_chain_2(
+    context: Optional[str] = None,
+    result_var: str = "result",
+    result_format: str = "as a dictionary"
+):
     """
     Crea una chain completa per la generazione di codice con retry logic.
 
     Args:
         context: Contesto aggiuntivo da includere nel prompt
+        result_var: Nome della variabile in cui salvare il risultato (default: 'result')
+        result_format: Formato del risultato (default: 'as a dictionary')
 
     Returns:
         Chain configurata e pronta all'uso
     """
-    code_gen_prompt = create_code_gen_prompt(context)
-    print("code_gen_prompt",code_gen_prompt)
-    code_chain_raw = (
-            code_gen_prompt | structured_llm | check_llm_output
-    )
+    print(context)
+    code_gen_prompt = create_code_gen_prompt(context, result_var, result_format)
+
+    code_chain_raw = code_gen_prompt | structured_llm | check_llm_output
 
     def insert_errors(inputs):
         """Insert errors for tool parsing in the messages"""

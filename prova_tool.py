@@ -12,15 +12,16 @@ import json
 import re
 from langchain_experimental.utilities.python import PythonREPL
 
-from code_chain import create_code_chain, max_iterations
+from code_chain import create_code_chain
+from code_chain2 import create_code_chain_2
 from datacleaner import DataCleaner
 from domain_configs import SLEEP_CONFIG, KITCHEN_CONFIG
 from registry.DomainRegistry import domain_registry
-from settings import client_oll as llm_code, oll_tool
+from settings import llm_code, llm_tool
 from tool import get_sleep_data, get_kitchen_data
 
 python_repl = PythonREPL()
-
+max_iterations = 3
 
 class StatisticalMethodSelection(BaseModel):
     """Schema per la selezione del metodo statistico"""
@@ -57,7 +58,7 @@ class State(TypedDict):
     plotly_figure: dict
     plot_attempts: int
     plot_errors: list
-    final_response: str
+    code_response: str
 
 
 max_iterations = 3
@@ -83,7 +84,7 @@ def extract_sleep_data_node(state: State) -> State:
     print("\n[NODE 1] Estrazione dati dal CSV...")
 
     query = state["query"]
-    llm_with_tools = oll_tool.bind_tools([get_sleep_data, get_kitchen_data])
+    llm_with_tools = llm_code.bind_tools([get_sleep_data, get_kitchen_data])
 
     extraction_prompt = f"""Recupera dati per questa query: "{query}"
 
@@ -138,10 +139,9 @@ def extract_sleep_data_node(state: State) -> State:
                     })
                     # Pulisci i dati
                     df_clean = process_kitchen_data(result, verbose=False)
-                    print(df_clean)
-                    # Converti in dizionario SENZA valori None/NaN
+
                     cleaned_records = df_clean.replace({np.nan: None}).to_dict('records')
-                    # Rimuovi le chiavi con valore None
+
                     cleaned_records = [
                         {k: v for k, v in record.items() if v is not None}
                         for record in cleaned_records
@@ -251,7 +251,7 @@ Analizza la query e determina il metodo statistico più appropriato."""
             "error_message": f"Failed to select statistical method: {e}"
         }
 
-# ==================== NODE 2: STATISTICAL ANALYSIS WITH REFLECTION ====================
+# ==================== NODE 2: STATISTICAL ANALYSIS WITH CODE CHECK ====================
 def statistical_analysis_node(state: State) -> State:
     """
     Nodo 2: Genera codice Python per analisi statistica usando Pydantic structured output.
@@ -292,12 +292,13 @@ Analysis Details:
 Available columns:
 {chr(10).join(f"- {df_name}: {', '.join(f'{col} ({dtype})' for col, dtype in columns.items())}" for df_name, columns in available_columns_by_df.items())}
 
-Subject to analyze: {subject}
+Don't filter data by subject. Data already filtred for subject: {subject}
 
 IMPORTANT:
 A pandas DataFrame named is already available in the environment:
+0. 'data' and 'timestamp_picco' columns are STRINGS - you MUST convert them to dates using pd.to_datetime() BEFORE merging !!!
 1. Use ONLY these DataFrames: {', '.join(available_dataframes)}  
-2. Access dataframes using their EXACT names: {', '.join(available_dataframes)}
+2. Access dataframes using their EXACT names: {', '.join(available_dataframes)} 
 3. Use ONLY these variables in your analysis: {', '.join(method_selection.get('variables', []))}
 4. DO NOT filter data by dates!! - the data is already filtered for the correct time period
 5. Work with ALL rows in the DataFrames provided
@@ -321,7 +322,7 @@ A pandas DataFrame named is already available in the environment:
         "iterations": iterations
     }
 
-def code_check(state: State) -> State:
+def check_stats_code(state: State) -> State:
     """
     Nodo 3: Verifica l'esecuzione del codice generato.
     """
@@ -361,6 +362,197 @@ def code_check(state: State) -> State:
         result = python_repl.locals.get('result')
         print(f"Result: {result}")
 
+        # Check if result exists and is a dict
+        if result is None:
+            print("---CODE BLOCK CHECK: FAILED---")
+            error_message = HumanMessage(
+                content="Your solution failed: 'result' variable was not created or is None. Make sure to store the output in a variable named 'result'."
+            )
+            return {
+                **state,
+                "messages": messages + [error_message],
+                "error": "yes"
+            }
+
+        # Only check for NaN in numeric values, not None values which are intentional
+        def contains_invalid_nan(obj):
+            """Check for NaN values only in float/numeric types, not None"""
+            if obj is None:
+                return False  # None is valid
+            if isinstance(obj, dict):
+                return any(contains_invalid_nan(v) for v in obj.values())
+            if isinstance(obj, (list, tuple, set)):
+                return any(contains_invalid_nan(v) for v in obj)
+            if isinstance(obj, str):
+                return False  # Strings are valid
+            if isinstance(obj, np.generic):
+                try:
+                    return np.isnan(obj)
+                except (TypeError, ValueError):
+                    return False
+            if isinstance(obj, float):
+                return np.isnan(obj)
+            return False
+
+        if contains_invalid_nan(result):
+            print("---CODE BLOCK CHECK: FAILED---")
+            print("ERROR TYPE: ValueError")
+            print("ERROR MESSAGE: Result contains NaN values in numeric fields")
+
+            error_message = HumanMessage(
+                content=f"Your solution failed: result contains NaN values in numeric fields. Either handle NaN values properly or set them to None explicitly. Result: {result}"
+            )
+
+            return {
+                **state,
+                "messages": messages + [error_message],
+                "error": "yes"
+            }
+
+    except Exception as e:
+        print("---CODE BLOCK CHECK: FAILED---")
+        print(f"ERROR TYPE: {type(e).__name__}")
+        print(f"ERROR MESSAGE: {str(e)}")
+
+        import traceback
+        print("FULL TRACEBACK:")
+        traceback.print_exc()
+
+        error_message = HumanMessage(content=f"Your solution failed the code execution test: {e}")
+
+        return {
+            **state,
+            "messages": messages + [error_message],
+            "error": "yes"
+        }
+
+    print("---CODE CHECK: SUCCESS---")
+    success_message = AIMessage(content=f"Code executed successfully. Result: {result}")
+    state["code_response"] = result
+    return {
+        **state,
+        "iterations": 0,
+        "messages": messages + [success_message],
+        "error": "no"
+    }
+
+# ==================== NODE 3: GRAPH Generator ====================
+def plot_generator(state:State) -> State:
+    code_result_str = json.dumps(state.get("code_response"), indent=2).replace('{', '{{').replace('}', '}}')
+    available_columns_by_df = domain_registry.get_available_columns_for_domains(state["domains_detected"])
+    available_colums = chr(10).join(f"- {df_name}: {', '.join(f'{col} ({dtype})' for col, dtype in columns.items())}" for df_name, columns in available_columns_by_df.items())
+
+    query_user = state.get("query")
+    messages = state.get("messages", [])
+    iterations = state.get("iterations", 0)
+    error = state.get("error", "")
+    if error == "yes":
+        messages = messages + [
+            HumanMessage(
+                content="Now, try again. Invoke the code tool to structure the output with a prefix, imports, and code block:")
+        ]
+    context = f""" 
+    Crea un grafico plotly che risponda alla domanda dell'utente: {query_user}
+    Hai a disposizione queste colonne {available_colums}
+    considera che è stata fatta questa analisi statistica: {state["statistical_method"]}
+
+    questo è il risultato:
+    {code_result_str}
+"""
+
+
+
+    plot_chain = create_code_chain_2(
+        context=context,
+        result_var="result",
+        result_format="usando fig.to_dict()"
+    )
+    plot_generated = plot_chain.invoke({"messages": messages})
+
+    assistant_message = AIMessage(
+        content=f"{plot_generated.description}\n\nImports:\n{plot_generated.imports}\n\nCode:\n{plot_generated.code}"
+    )
+
+    iterations = iterations + 1
+
+    return {
+        **state,
+        "plotly_figure": plot_generated,
+        "messages": messages + [assistant_message],
+        "iterations": iterations
+    }
+
+def check_plot_code(state:State) -> State:
+    """
+        Nodo 3: Verifica l'esecuzione del codice generato.
+        """
+    print("--Checking code solution--")
+
+    messages = state.get("messages", [])
+    plot_solution = state["plotly_figure"]
+    iterations = state.get("iterations", 0)
+    raw_data = state.get("raw_data", {})
+    imports = plot_solution.imports
+    code = plot_solution.code
+
+    try:
+        print("---CHECK IMPORTS---")
+        python_repl.run(imports)
+    except Exception as e:
+        print("---CODE IMPORT CHECK: FAILED---")
+        error_message = HumanMessage(content=f"Your solution failed the import test: {e}")
+        return {
+            **state,
+            "messages": messages + [error_message],
+            "error": "yes"
+        }
+
+    try:
+        print("---CHECK CODE BLOCK---")
+        python_repl.globals["result"] = {}
+        for key, records in raw_data.items():
+            import pandas as pd
+            df = pd.DataFrame(records)
+            python_repl.globals[key] = df
+            print(f"Loaded {key} into globals")
+
+        print(f"Executing code:\n{code}")
+        python_repl.run(code)
+        result = python_repl.globals.get('result')
+        print(f"Result: {result}")
+
+        def contains_nan(obj):
+            if obj is None:
+                return False
+            if isinstance(obj, dict):
+                return any(contains_nan(v) for v in obj.values())
+            if isinstance(obj, (list, tuple, set)):
+                return any(contains_nan(v) for v in obj)
+            if isinstance(obj, np.generic):
+                try:
+                    return np.isnan(obj)
+                except Exception:
+                    return False
+            if isinstance(obj, float):
+                return np.isnan(obj)
+            return False
+
+        if contains_nan(result) or result is None:
+            print("---CODE BLOCK CHECK: FAILED---")
+            print("ERROR TYPE: ValueError")
+            print("ERROR MESSAGE: Result contains NaN values")
+
+            error_message = HumanMessage(
+                content=f"Your solution failed the code execution test: result contains NaN values ({result})"
+            )
+
+            return {
+                **state,
+                "messages": messages + [error_message],
+                "error": "yes"
+            }
+
+
     except Exception as e:
         print("---CODE BLOCK CHECK: FAILED---")
         print(f"ERROR TYPE: {type(e).__name__}")
@@ -381,13 +573,13 @@ def code_check(state: State) -> State:
 
     print("---CODE CHECK: SUCCESS---")
     success_message = AIMessage(content=f"Code executed successfully. Result: {result}")
-
+    state["code_response"] = result
     return {
         **state,
+        "iterations": 0,
         "messages": messages + [success_message],
         "error": "no"
     }
-
 
 # ==================== CONDITIONAL EDGES ====================
 def check_error_extract(state: State) -> Literal["select_method", "end"]:
@@ -431,7 +623,9 @@ def create_sleep_analysis_graph() -> CompiledStateGraph:
     workflow.add_node("extract_data", extract_sleep_data_node)
     workflow.add_node("select_method", select_statistical_method_node)
     workflow.add_node("analyze", statistical_analysis_node)
-    workflow.add_node("check_code", code_check)
+    workflow.add_node("check_code", check_stats_code)
+    workflow.add_node("plot_generator", plot_generator)
+    workflow.add_node("check_plot", check_plot_code)
 
     # Entry point
     workflow.set_entry_point("extract_data")
@@ -461,18 +655,31 @@ def create_sleep_analysis_graph() -> CompiledStateGraph:
     # analyze -> check_code (always)
     workflow.add_edge("analyze", "check_code")
 
-    # check_code -> [analyze (retry) OR end (success/max iterations)]
+    # check_code -> [analyze (retry) OR plot_generator (success)]
     workflow.add_conditional_edges(
         "check_code",
+        lambda state: "plot_generator" if state.get("error") == "no" else ("analyze" if state.get("iterations", 0) < max_iterations else "end"),
+        {
+            "analyze": "analyze",
+            "plot_generator": "plot_generator",
+            "end": END
+        }
+    )
+
+    # plot_generator -> check_plot (always)
+    workflow.add_edge("plot_generator", "check_plot")
+
+    # check_plot -> [plot_generator (retry) OR end (success/max iterations)]
+    workflow.add_conditional_edges(
+        "check_plot",
         decide_to_finish,
         {
-            "analyze": "analyze",  # Riprova
-            "end": END  # Termina
+            "analyze": "plot_generator",  # Riprova il plot
+            "end": END
         }
     )
 
     return workflow.compile()
-
 
 # ==================== MAIN ====================
 if __name__ == "__main__":
