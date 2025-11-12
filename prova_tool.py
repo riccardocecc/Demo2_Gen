@@ -287,7 +287,6 @@ Analysis Details:
 - Statistical Methods: {', '.join(method_selection.get('statistical_methods', []))}
 - Calculations Needed: {', '.join(f"{k}: {v}" for k, v in method_selection.get('calculations_needed', {}).items())}
 - Expected Outputs: {', '.join(method_selection.get('expected_outputs', []))}
-- Visualization Type: {method_selection.get('visualization_type', 'N/A')}
 
 Available columns:
 {chr(10).join(f"- {df_name}: {', '.join(f'{col} ({dtype})' for col, dtype in columns.items())}" for df_name, columns in available_columns_by_df.items())}
@@ -454,12 +453,24 @@ def plot_generator(state:State) -> State:
         ]
     context = f""" 
     Crea un grafico plotly che risponda alla domanda dell'utente: {query_user}
-    Hai a disposizione queste colonne {available_colums}
-    considera che è stata fatta questa analisi statistica: {statistical_method_str}
 
-    questo è il risultato:
-    {code_result_str}
-"""
+    ANALISI STATISTICA PRECEDENTE:
+    - Tipo: {state["statistical_method"].get('analysis_type')}
+    - Variabili analizzate: {', '.join(state["statistical_method"].get('variables', []))}
+    - Risultato: {code_result_str}
+
+    CREA UN GRAFICO CHE MOSTRI VISUALMENTE QUESTA ANALISI.
+
+    Colonne disponibili: {available_colums}
+
+    ISTRUZIONI CRITICHE:
+    1. Usa fig.to_dict() per convertire il grafico
+    2. ASSICURATI che la variabile 'result' sia GLOBALE nel REPL
+    3. Il grafico deve visualizzare chiaramente la correlazione trovata
+
+    Esempio di codice finale:
+    result = fig.to_dict()  # Questo deve essere l'ultima linea
+    """
 
 
 
@@ -520,7 +531,7 @@ def check_plot_code(state:State) -> State:
         print(f"Executing code:\n{code}")
         python_repl.run(code)
         result = python_repl.globals.get('result')
-        print(f"Result: {result}")
+        print(f"Result daje: {result}")
 
         def contains_nan(obj):
             if obj is None:
