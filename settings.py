@@ -22,7 +22,30 @@ ollama_pwd=os.getenv("OLLAMA_PWD")
 credentials = f"{ollama_user}:{ollama_pwd}"
 base64_credentials = base64.b64encode(credentials.encode()).decode()
 
+client_oll = ChatOllama(
+    model='qwen3:32b',
+    base_url='https://lovelace.ewlab.di.unimi.it/ollama',
+    reasoning=False,
+    validate_model_on_init=True,
+    num_predict=4096,
+    client_kwargs={
+            "headers": {
+                "Authorization": f"Basic {base64_credentials}"
+            }
+    }
+)
 
+oll_tool = ChatOllama(
+    model='qwen3:32b',
+    base_url='https://lovelace.ewlab.di.unimi.it/ollama',
+    reasoning=False,
+    validate_model_on_init=True,
+    client_kwargs={
+            "headers": {
+                "Authorization": f"Basic {base64_credentials}"
+            }
+    }
+)
 llm_graph_generator = ChatGoogleGenerativeAI(
     model="gemini-2.5-pro",
     google_api_key=google_api_key,

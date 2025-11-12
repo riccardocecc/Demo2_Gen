@@ -13,14 +13,14 @@ import re
 from langchain_experimental.utilities.python import PythonREPL
 
 from code_chain import create_code_chain
-from code_chain2 import create_code_chain_2
 from datacleaner import DataCleaner
 from domain_configs import SLEEP_CONFIG, KITCHEN_CONFIG
 from registry.DomainRegistry import domain_registry
-from settings import llm_code, llm_tool
+from settings import client_oll as llm_code
 from tool import get_sleep_data, get_kitchen_data
 
 python_repl = PythonREPL()
+python_repl_graph = PythonREPL()
 max_iterations = 3
 
 class StatisticalMethodSelection(BaseModel):
@@ -82,12 +82,10 @@ def extract_sleep_data_node(state: State) -> State:
     Nodo 1: Estrae i dati dal CSV usando la query in linguaggio naturale.
     """
     print("\n[NODE 1] Estrazione dati dal CSV...")
-
     query = state["query"]
     llm_with_tools = llm_code.bind_tools([get_sleep_data, get_kitchen_data])
 
     extraction_prompt = f"""Recupera dati per questa query: "{query}"
-
     Tool disponibili:
     - get_sleep_data: per dati sul sonno
     - get_kitchen_data: per dati sulla cucina
@@ -304,7 +302,11 @@ A pandas DataFrame named is already available in the environment:
 6. NO GRAPH 
 """
 
-    code_gen_chain = create_code_chain(context)
+    code_gen_chain = create_code_chain(
+        context=context,
+        result_var="result",
+        result_format="as a dictionary"
+    )
 
     code_solution = code_gen_chain.invoke({"messages": messages})
 
@@ -435,50 +437,110 @@ def check_stats_code(state: State) -> State:
         "error": "no"
     }
 
-# ==================== NODE 3: GRAPH Generator ====================
-def plot_generator(state:State) -> State:
-    code_result_str = json.dumps(state.get("code_response"), indent=2).replace('{', '{{').replace('}', '}}')
-    statistical_method_str = str(state["statistical_method"]).replace('{', '{{').replace('}', '}}')
-    available_columns_by_df = domain_registry.get_available_columns_for_domains(state["domains_detected"])
-    available_colums = chr(10).join(f"- {df_name}: {', '.join(f'{col} ({dtype})' for col, dtype in columns.items())}" for df_name, columns in available_columns_by_df.items())
 
+def plot_generator(state: State) -> State:
+    """
+    Nodo: Genera codice per creare un grafico Plotly basato sui risultati dell'analisi statistica.
+    """
+    print("\n[NODE PLOT] Generazione grafico Plotly...")
+
+    # Prepara i dati per il prompt
+    code_result = state.get("code_response", {})
+    statistical_method = state["statistical_method"]
     query_user = state.get("query")
     messages = state.get("messages", [])
     iterations = state.get("iterations", 0)
     error = state.get("error", "")
+    available_dataframes = list(state["raw_data"].keys())
+
+    # Ottieni informazioni sulle colonne disponibili
+    available_columns_by_df = domain_registry.get_available_columns_for_domains(state["domains_detected"])
+
     if error == "yes":
         messages = messages + [
             HumanMessage(
                 content="Now, try again. Invoke the code tool to structure the output with a prefix, imports, and code block:")
         ]
-    context = f""" 
-    Crea un grafico plotly che risponda alla domanda dell'utente: {query_user}
 
-    ANALISI STATISTICA PRECEDENTE:
-    - Tipo: {state["statistical_method"].get('analysis_type')}
-    - Variabili analizzate: {', '.join(state["statistical_method"].get('variables', []))}
-    - Risultato: {code_result_str}
+    # Formatta le informazioni in modo chiaro
+    analysis_type = statistical_method.get('analysis_type', 'unknown')
+    variables = statistical_method.get('variables', [])
 
-    CREA UN GRAFICO CHE MOSTRI VISUALMENTE QUESTA ANALISI.
+    # Converti i risultati in stringa senza parentesi graffe
+    result_lines = []
+    for key, value in code_result.items():
+        result_lines.append(f"  - {key}: {value}")
+    result_summary = "\n".join(result_lines)
 
-    Colonne disponibili: {available_colums}
+    # Formatta le colonne disponibili
+    columns_info = chr(10).join(
+        f"  • {df_name}: {', '.join(f'{col} ({dtype})' for col, dtype in columns.items())}"
+        for df_name, columns in available_columns_by_df.items()
+    )
 
-    ISTRUZIONI CRITICHE:
-    1. Usa fig.to_dict() per convertire il grafico
-    2. ASSICURATI che la variabile 'result' sia GLOBALE nel REPL
-    3. Il grafico deve visualizzare chiaramente la correlazione trovata
+    context = f"""OBIETTIVO: Crea un grafico Plotly che visualizzi i risultati dell'analisi statistica.
 
-    Esempio di codice finale:
-    result = fig.to_dict()  # Questo deve essere l'ultima linea
-    """
+DOMANDA UTENTE: "{query_user}"
 
+DATI ANALISI COMPLETATA:
+- Tipo di analisi: {analysis_type}
+- Variabili analizzate: {', '.join(variables)}
+- Risultati statistici ottenuti:
+{result_summary}
 
+DATAFRAME DISPONIBILI:
+{', '.join(available_dataframes)}
 
-    plot_chain = create_code_chain_2(
+IMPORTANTE: I DataFrames contengono i seguenti campi:
+{columns_info}
+
+REQUISITI DEL GRAFICO:
+1. Scegli il tipo di grafico più appropriato per l'analisi {analysis_type}:
+   - correlation: scatter plot con linea di tendenza
+   - comparison: bar chart o box plot
+   - trend: line chart
+   - proportion: pie chart o bar chart
+   - descriptive: histogram o box plot
+
+2. Il grafico DEVE:
+   - Visualizzare le variabili: {', '.join(variables)}
+   - Includere titoli descrittivi e labels degli assi
+   - DataFrame già presente in globals con nome: {available_dataframes[0]}
+   - Se l'analisi ha prodotto coefficienti/statistiche, mostrarli come annotazioni o nel titolo
+
+3. STRUTTURA DEL CODICE RICHIESTA:
+   Step 1: Usa il DataFrame già presente globale esatto: {available_dataframes[0]}
+   Step 2: Crea il grafico con plotly.express o plotly.graph_objects
+   Step 3: Personalizza titolo, labels, colori
+   Step 4: Se correlation, aggiungi trendline="ols"
+   Step 5: IMPORTANTE - Converti in dizionario: result = fig.to_dict()
+
+4. BEST PRACTICES:
+   - Usa colori professionali
+   - Aggiungi hover_data per informazioni aggiuntive
+   - Includi i risultati numerici importanti nel titolo del grafico
+   - Per correlation: mostra il coefficiente di correlazione e p-value nel titolo
+
+5. ESEMPIO SPECIFICO PER QUESTO CASO:
+   Dato che l'analisi è di tipo correlation, crea uno scatter plot con:
+   - Asse X: prima variabile della lista
+   - Asse Y: seconda variabile della lista  
+   - Aggiungi linea di tendenza con trendline="ols"
+   - Titolo che include i valori statistici calcolati
+   - Labels in italiano per gli assi
+
+NOTA CRITICA: 
+- La variabile globale result DEVE contenere fig.to_dict()
+- NON lasciare result vuoto o None
+- Assicurati di chiamare to_dict() sul grafico Plotly creato e salvalo nella variabile globale
+"""
+
+    plot_chain = create_code_chain(
         context=context,
         result_var="result",
-        result_format="usando fig.to_dict()"
+        result_format="using fig.to_dict() to convert the Plotly figure to a dictionary"
     )
+
     plot_generated = plot_chain.invoke({"messages": messages})
 
     assistant_message = AIMessage(
@@ -509,9 +571,8 @@ def check_plot_code(state:State) -> State:
 
     try:
         print("---CHECK IMPORTS---")
-        python_repl.run(imports)
+        python_repl_graph.run(imports)
     except Exception as e:
-        print("---CODE IMPORT CHECK: FAILED---")
         error_message = HumanMessage(content=f"Your solution failed the import test: {e}")
         return {
             **state,
@@ -529,8 +590,9 @@ def check_plot_code(state:State) -> State:
             print(f"Loaded {key} into globals")
 
         print(f"Executing code:\n{code}")
-        python_repl.run(code)
+        python_repl_graph.run(code)
         result = python_repl.globals.get('result')
+
         print(f"Result daje: {result}")
 
         def contains_nan(obj):
