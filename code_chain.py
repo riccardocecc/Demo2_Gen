@@ -1,125 +1,144 @@
 from pydantic import BaseModel, Field
 from langchain_core.prompts import ChatPromptTemplate
-from typing import Optional
+from langchain_core.messages import HumanMessage, AIMessage
+from typing import Optional, List, Union
 from settings import llm_code
 
-class code(BaseModel):
-    description: str = Field(description="Brevissima descrizone del codice")
-    imports: str = Field(description="Code block import statements")
-    code: str = Field(description="Code block not include import statements")
+
+class Code(BaseModel):
+    """Schema per il codice generato."""
+    description: str = Field(description="Brevissima descrizione del codice")
+    imports: str = Field(description="Blocco di import statements")
+    code: str = Field(description="Blocco di codice senza imports")
 
 
-def create_code_gen_prompt(
-    context: Optional[str] = None,
-    result_var: str = "result",
-    result_format: str = "as a dictionary"
-):
-    """
-    Crea un prompt per la generazione di codice con contesto opzionale.
+def create_system_instructions(
+        context: Optional[str] = None,
+        result_var: str = "result",
+        result_format: str = "as a dictionary"
+) -> str:
+    """Crea le istruzioni di sistema per la generazione del codice."""
 
-    Args:
-        context: Contesto aggiuntivo da includere nel prompt
-        result_var: Nome della variabile in cui salvare il risultato (default: 'result')
-        result_format: Formato del risultato (default: 'as a dictionary')
+    instructions = f"""You are a Python coding expert.
+You MUST respond using the `code` tool with valid JSON.
 
-    Returns:
-        ChatPromptTemplate configurato
-    """
-    base_instructions = f"""/no thinking <instructions>  
-You are a coding assistant with expertise in Python.  
-You MUST invoke the provided tool named `code` to return your answer.  
-DO NOT write natural language explanations outside the tool.  
-Your response MUST be a valid JSON matching this schema:
+Response schema:
+{{
+  "description": "brief code explanation",
+  "imports": "import statements only",
+  "code": "implementation code that stores final result in variable '{result_var}' {result_format}"
+}}
 
-{{{{
-  "description": "short explanation of the code purpose",
-  "imports": "code block with import statements",
-  "code": "code block implementing the solution (without imports). Store the final result in a global variable named '{result_var}' {result_format}."
-}}}}
-
-Ensure that the code you provide is executable, with all required imports, data definitions, and dependencies included."""
+Rules:
+- Provide executable code with all dependencies
+- Separate imports from implementation
+- No natural language outside the tool response"""
 
     if context:
-        system_message = f"{base_instructions}\n\n<context>\n{context}\n</context>\n\nHere is the user question:"
-    else:
-        system_message = f"{base_instructions}\n\nHere is the user question:"
+        instructions += f"\n\n<context>\n{context}\n</context>"
 
-    return ChatPromptTemplate.from_messages(
-        [
-            ("human", system_message),
-            ("placeholder", "{messages}"),
-        ]
-    )
-structured_llm = llm_code.with_structured_output(code, include_raw=True)
-
-
-def check_llm_output(tool_output):
-    """Verifica parse error o mancata invocazione del tool e ritorna il parsed object."""
-    raw = tool_output.get("raw")
-    if raw is not None:
-        try:
-            print("RAW CONTENT (for debug):\n", raw.content)
-        except Exception:
-            pass
-
-    if tool_output.get("parsing_error"):
-        error = tool_output["parsing_error"]
-        raise ValueError(
-            f"Error parsing your output! Parse error: {error}. RAW: {raw}"
-        )
-
-    parsed = tool_output.get("parsed")
-    if not parsed:
-        print("Tool calls:", tool_output.get("tool_calls"))
-        raise ValueError(
-            "You did not use the provided tool or parsing failed! Be sure to invoke the tool to structure the output."
-        )
-
-    return tool_output
+    return instructions
 
 
 def create_code_chain(
-    context: Optional[str] = None,
-    result_var: str = "result",
-    result_format: str = "as a dictionary"
+        context: Optional[str] = None,
+        result_var: str = "result",
+        result_format: str = "as a dictionary",
+        max_retries: int = 3
 ):
     """
-    Crea una chain completa per la generazione di codice con retry logic.
+    Crea una chain completa per la generazione di codice con retry automatico.
 
     Args:
-        context: Contesto aggiuntivo da includere nel prompt
-        result_var: Nome della variabile in cui salvare il risultato (default: 'result')
+        context: Contesto aggiuntivo per il prompt
+        result_var: Nome della variabile risultato (default: 'result')
         result_format: Formato del risultato (default: 'as a dictionary')
+        max_retries: Numero massimo di retry (default: 3)
 
     Returns:
-        Chain configurata e pronta all'uso
+        Chain configurata
     """
-    print(context)
-    code_gen_prompt = create_code_gen_prompt(context, result_var, result_format)
 
-    code_chain_raw = code_gen_prompt | structured_llm | check_llm_output
+    system_instructions = create_system_instructions(context, result_var, result_format)
+    structured_llm = llm_code.with_structured_output(Code, include_raw=True)
 
-    def insert_errors(inputs):
-        """Insert errors for tool parsing in the messages"""
-        error = inputs["error"]
-        messages = inputs["messages"]
-        messages += [
-            (
-                "assistant",
-                f"Retry. You are required to fix the parsing errors: {error} \n\n You must invoke the provided tool."
+    def format_messages(inputs: dict) -> List:
+        """Formatta i messaggi per l'LLM."""
+        messages = [{"role": "system", "content": system_instructions}]
+
+        # Aggiungi i messaggi dell'utente/assistente
+        for msg in inputs.get("messages", []):
+            if isinstance(msg, (HumanMessage, AIMessage)):
+                messages.append({
+                    "role": "user" if isinstance(msg, HumanMessage) else "assistant",
+                    "content": msg.content
+                })
+            elif isinstance(msg, tuple):
+                role = "user" if msg[0] == "human" else "assistant"
+                messages.append({"role": role, "content": msg[1]})
+
+        return messages
+
+    def validate_output(output: dict) -> dict:
+        """Valida l'output dell'LLM e solleva eccezioni se necessario."""
+
+        # Debug log
+        if raw := output.get("raw"):
+            try:
+                print(f"[DEBUG] Raw content: {raw.content[:200]}...")
+            except Exception:
+                pass
+
+        # Controlla errori di parsing
+        if parsing_error := output.get("parsing_error"):
+            raise ValueError(
+                f"Parsing error: {parsing_error}\n"
+                f"LLM must invoke the 'code' tool with valid JSON."
             )
-        ]
-        return {
-            "messages": messages,
-        }
 
-    fallback_chain = insert_errors | code_chain_raw
-    N = 3
-    code_chain_re_try = code_chain_raw.with_fallbacks(
-        fallbacks=[fallback_chain] * N, exception_key="error"
+        # Verifica presenza del parsed object
+        if not (parsed := output.get("parsed")):
+            raise ValueError(
+                "Tool not invoked or parsing failed.\n"
+                "You MUST use the 'code' tool to structure your response."
+            )
+
+        return output
+
+    def handle_retry(inputs: dict) -> dict:
+        """Gestisce i retry aggiungendo il messaggio di errore."""
+        error = inputs["error"]
+        messages = list(inputs["messages"])
+
+        messages.append((
+            "assistant",
+            f"RETRY REQUIRED:\n{error}\n\n"
+            "Fix the error and invoke the 'code' tool correctly."
+        ))
+
+        return {"messages": messages}
+
+    def extract_parsed(output: dict) -> Code:
+        """Estrae l'oggetto parsed dal risultato."""
+        return output["parsed"]
+
+    # Chain principale
+    main_chain = (
+            format_messages
+            | structured_llm
+            | validate_output
     )
 
-    def parse_output(solution):
-        return solution["parsed"]
+    # Chain con retry
+    retry_chain = handle_retry | main_chain
 
-    return code_chain_re_try | parse_output
+    # Configura fallback
+    chain_with_retries = main_chain.with_fallbacks(
+        fallbacks=[retry_chain] * max_retries,
+        exception_key="error"
+    )
+
+    # Aggiungi estrazione finale
+    return chain_with_retries | extract_parsed
+
+

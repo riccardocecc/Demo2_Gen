@@ -16,7 +16,7 @@ from code_chain import create_code_chain
 from datacleaner import DataCleaner
 from domain_configs import SLEEP_CONFIG, KITCHEN_CONFIG
 from registry.DomainRegistry import domain_registry
-from settings import client_oll as llm_code
+from settings import  llm_code
 from tool import get_sleep_data, get_kitchen_data
 
 python_repl = PythonREPL()
@@ -85,7 +85,7 @@ def extract_sleep_data_node(state: State) -> State:
     query = state["query"]
     llm_with_tools = llm_code.bind_tools([get_sleep_data, get_kitchen_data])
 
-    extraction_prompt = f"""Recupera dati per questa query: "{query}"
+    extraction_prompt = f"""Recupera dati per questa query: "{query}" non considerare il resto, estrai solamente le informaizoni per invocare:
     Tool disponibili:
     - get_sleep_data: per dati sul sonno
     - get_kitchen_data: per dati sulla cucina
@@ -103,7 +103,7 @@ def extract_sleep_data_node(state: State) -> State:
         # Crea messaggio usando HumanMessage
         messages = [HumanMessage(content=extraction_prompt)]
         response = llm_with_tools.invoke(messages)
-
+        print(response)
         if isinstance(response, AIMessage) and response.tool_calls:
             print("tool calls:", response.tool_calls)
 
@@ -513,7 +513,7 @@ REQUISITI DEL GRAFICO:
    Step 2: Crea il grafico con plotly.express o plotly.graph_objects
    Step 3: Personalizza titolo, labels, colori
    Step 4: Se correlation, aggiungi trendline="ols"
-   Step 5: IMPORTANTE - Converti in dizionario: result = fig.to_dict()
+   Step 5: IMPORTANTE - Converti in dizionario: result_graph = fig.to_dict()
 
 4. BEST PRACTICES:
    - Usa colori professionali
@@ -530,14 +530,13 @@ REQUISITI DEL GRAFICO:
    - Labels in italiano per gli assi
 
 NOTA CRITICA: 
-- La variabile globale result DEVE contenere fig.to_dict()
-- NON lasciare result vuoto o None
-- Assicurati di chiamare to_dict() sul grafico Plotly creato e salvalo nella variabile globale
+- La variabile globale result_graph DEVE contenere il grafico!!!!
+- NON lasciare result_graph vuoto o None
 """
 
     plot_chain = create_code_chain(
         context=context,
-        result_var="result",
+        result_var="result_graph",
         result_format="using fig.to_dict() to convert the Plotly figure to a dictionary"
     )
 
@@ -549,18 +548,22 @@ NOTA CRITICA:
 
     iterations = iterations + 1
 
+    plot_attempts = state.get("plot_attempts", 0) + 1
+
     return {
         **state,
         "plotly_figure": plot_generated,
         "messages": messages + [assistant_message],
-        "iterations": iterations
+        "iterations": iterations,
+        "plot_attempts": plot_attempts
     }
 
-def check_plot_code(state:State) -> State:
+
+def check_plot_code(state: State) -> State:
     """
-        Nodo 3: Verifica l'esecuzione del codice generato.
-        """
-    print("--Checking code solution--")
+    Nodo: Verifica l'esecuzione del codice del grafico.
+    """
+    print("--Checking plot code solution--")
 
     messages = state.get("messages", [])
     plot_solution = state["plotly_figure"]
@@ -570,10 +573,10 @@ def check_plot_code(state:State) -> State:
     code = plot_solution.code
 
     try:
-        print("---CHECK IMPORTS---")
-        python_repl_graph.run(imports)
+        print("---CHECK PLOT IMPORTS---")
+        python_repl.run(imports)  # Usa lo stesso REPL dell'analisi
     except Exception as e:
-        error_message = HumanMessage(content=f"Your solution failed the import test: {e}")
+        error_message = HumanMessage(content=f"Il codice di import del grafico ha fallito: {e}")
         return {
             **state,
             "messages": messages + [error_message],
@@ -581,80 +584,114 @@ def check_plot_code(state:State) -> State:
         }
 
     try:
-        print("---CHECK CODE BLOCK---")
-        python_repl.globals["result"] = {}
+        print("---CHECK PLOT CODE BLOCK---")
+
+        # Carica i DataFrame nello stesso ambiente dell'analisi
         for key, records in raw_data.items():
             import pandas as pd
             df = pd.DataFrame(records)
             python_repl.globals[key] = df
             print(f"Loaded {key} into globals")
 
-        print(f"Executing code:\n{code}")
-        python_repl_graph.run(code)
-        result = python_repl.globals.get('result')
+        print(f"Executing plot code:\n{code}")
 
-        print(f"Result daje: {result}")
+        # Esegui il codice del grafico
+        python_repl.run(code)
 
-        def contains_nan(obj):
-            if obj is None:
-                return False
-            if isinstance(obj, dict):
-                return any(contains_nan(v) for v in obj.values())
-            if isinstance(obj, (list, tuple, set)):
-                return any(contains_nan(v) for v in obj)
-            if isinstance(obj, np.generic):
-                try:
-                    return np.isnan(obj)
-                except Exception:
-                    return False
-            if isinstance(obj, float):
-                return np.isnan(obj)
-            return False
+        # Recupera il risultato - IMPORTANTE: usa result_graph come specificato
+        result_graph = python_repl.locals.get('result_graph')
 
-        if contains_nan(result) or result is None:
-            print("---CODE BLOCK CHECK: FAILED---")
-            print("ERROR TYPE: ValueError")
-            print("ERROR MESSAGE: Result contains NaN values")
+        if result_graph is None:
+            # Prova a recuperare dalla variabile globale
+            result_graph = python_repl.globals.get('result_graph')
 
+        print(f"Plot result: {result_graph}")
+        # after you have result_graph
+        import plotly.graph_objects as go
+        from pathlib import Path
+
+        # ricostruisci la figura da dict
+        fig = go.Figure(result_graph)
+
+        # genera HTML standalone (usa CDN per plotly.js, riduce la dimensione del file)
+        html = fig.to_html(full_html=True, include_plotlyjs='cdn')
+
+        project_root = Path(__file__).parent  # cartella dove si trova il file Python
+        out_path = project_root / "plot_debug.html"
+        out_path.write_text(html, encoding='utf-8')
+
+        print(f"Saved debug HTML to: {out_path}")  # log nel terminale
+
+        # Verifica che result_graph sia un dizionario valido
+        if result_graph is None:
             error_message = HumanMessage(
-                content=f"Your solution failed the code execution test: result contains NaN values ({result})"
+                content="Il codice del grafico non ha creato la variabile 'result_graph'. Assicurati di usare: result_graph = fig.to_dict()"
             )
-
             return {
                 **state,
                 "messages": messages + [error_message],
                 "error": "yes"
             }
 
+        # Verifica la struttura base del dizionario Plotly
+        required_keys = ['data', 'layout']
+        if not all(key in result_graph for key in required_keys):
+            error_message = HumanMessage(
+                content=f"Il grafico non ha la struttura Plotly corretta. Dovrebbe contenere: {required_keys}. Contiene: {list(result_graph.keys())}"
+            )
+            return {
+                **state,
+                "messages": messages + [error_message],
+                "error": "yes"
+            }
 
     except Exception as e:
-        print("---CODE BLOCK CHECK: FAILED---")
+        print("---PLOT CODE CHECK: FAILED---")
         print(f"ERROR TYPE: {type(e).__name__}")
         print(f"ERROR MESSAGE: {str(e)}")
 
-        # QUESTO È CRITICO - stampa il traceback completo
         import traceback
         print("FULL TRACEBACK:")
         traceback.print_exc()
 
-        error_message = HumanMessage(content=f"Your solution failed the code execution test: {e}")
-
+        error_message = HumanMessage(content=f"Il codice del grafico ha fallito: {e}")
         return {
             **state,
             "messages": messages + [error_message],
             "error": "yes"
         }
 
-    print("---CODE CHECK: SUCCESS---")
-    success_message = AIMessage(content=f"Code executed successfully. Result: {result}")
-    state["code_response"] = result
+    print("---PLOT CODE CHECK: SUCCESS---")
+    success_message = AIMessage(content="Grafico generato con successo!")
+
+    # NON sovrascrivere code_response - crea una nuova chiave per il grafico
     return {
         **state,
         "iterations": 0,
         "messages": messages + [success_message],
-        "error": "no"
+        "error": "no",
+        "plotly_figure_dict": result_graph,  # Nuova chiave per il grafico
+        # Mantieni il risultato dell'analisi statistica originale
+        "code_response": state.get("code_response")
     }
 
+def decide_to_finish_plot(state: State) -> Literal["plot_generator", "end"]:
+    """
+    Decide se continuare con il plot o terminare.
+    """
+    error = state.get("error", "")
+    iterations = state.get("iterations", 0)
+    plot_attempts = state.get("plot_attempts", 0)
+
+    if error == "no":
+        print("---PLOT DECISION: SUCCESS - FINISH---")
+        return "end"
+    elif iterations >= max_iterations or plot_attempts >= 2:
+        print(f"---PLOT DECISION: MAX ATTEMPTS REACHED - FINISH---")
+        return "end"
+    else:
+        print(f"---PLOT DECISION: RETRY PLOT (attempt {plot_attempts + 1})---")
+        return "plot_generator"
 # ==================== CONDITIONAL EDGES ====================
 def check_error_extract(state: State) -> Literal["select_method", "end"]:
     """Controlla se ci sono errori dopo l'estrazione dati"""
@@ -744,11 +781,12 @@ def create_sleep_analysis_graph() -> CompiledStateGraph:
     workflow.add_edge("plot_generator", "check_plot")
 
     # check_plot -> [plot_generator (retry) OR end (success/max iterations)]
+    # check_plot -> [plot_generator (retry) OR end (success/max iterations)]
     workflow.add_conditional_edges(
         "check_plot",
-        decide_to_finish,
+        decide_to_finish_plot,  # Usa la nuova funzione
         {
-            "analyze": "plot_generator",  # Riprova il plot
+            "plot_generator": "plot_generator",
             "end": END
         }
     )
@@ -760,7 +798,7 @@ if __name__ == "__main__":
     app = create_sleep_analysis_graph()
 
     result = app.invoke({
-        "query": "C'è qualche correlazione tra il numero di risvegli e le ore di sonno dormite per il soggetto 2 negli ultimi 10 giorni?",
+        "query": "Come sta utilizzando la cucina il soggeto 2 negli ultimi 10 giorni?",
         "messages": [],
         "iterations": 0
     })
