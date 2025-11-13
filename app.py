@@ -1,12 +1,13 @@
 import streamlit as st
 from datetime import datetime
+import plotly.graph_objects as go
 
-from prova_tool import create_sleep_analysis_chain
+from prova_tool import create_sleep_analysis_graph
 
 # Configurazione pagina
 st.set_page_config(
     page_title="Demo Multi Agent - Only Gen",
-    page_icon="📊",
+    page_icon="",
     layout="wide"
 )
 
@@ -14,28 +15,28 @@ st.set_page_config(
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-if "chain" not in st.session_state:
-    st.session_state.chain = create_sleep_analysis_chain()
+if "graph" not in st.session_state:
+    st.session_state.graph = create_sleep_analysis_graph()
 
-# Header
-st.title("📊 Demo Multi Agent - Only Gen")
-st.markdown("Analisi statistiche più approfondite")
 
-# Mostra chat history
+st.title("Demo Multi Agent - Only Gen")
+st.markdown("Analisi statistiche piu approfondite")
+
+
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-        # Se c'è un grafico Vega-Lite, mostralo
-        if "vega_spec" in message:
-            st.vega_lite_chart(
-                data=message["vega_spec"].get("data", {}).get("values", []),
-                spec=message["vega_spec"],
-                use_container_width=True
-            )
+
+        if "plotly_figure" in message:
+            try:
+                fig = go.Figure(message["plotly_figure"])
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.error(f"Errore nella visualizzazione del grafico: {e}")
 
 # Input utente
-if prompt := st.chat_input("Es: C'è correlazione tra risvegli e frequenza cardiaca negli ultimi 10 giorni?"):
+if prompt := st.chat_input("Es: C'e correlazione tra risvegli e frequenza cardiaca negli ultimi 10 giorni?"):
 
     # Mostra messaggio utente
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -44,7 +45,7 @@ if prompt := st.chat_input("Es: C'è correlazione tra risvegli e frequenza cardi
 
     # Mostra spinner mentre elabora
     with st.chat_message("assistant"):
-        with st.spinner("🔍 Analizzo i dati..."):
+        with st.spinner("Analizzo i dati..."):
 
             # Esegui analisi
             initial_state = {
@@ -52,24 +53,24 @@ if prompt := st.chat_input("Es: C'è correlazione tra risvegli e frequenza cardi
                 "subject_id": 0,
                 "period": "",
                 "raw_data": {},
-                "data_sources": [],
+                "domains_detected": [],
                 "statistical_method": {},
-                "analysis_code": "",
-                "analysis_results": {},
-                "analysis_errors": [],
-                "analysis_attempts": 0,
-                "vega_spec": {},
-                "plot_html": "",
-                "final_response": "",
                 "messages": [],
-                "error": ""
+                "error": "",
+                "iterations": 0,
+                "generation": "",
+                "code_response": "",
+                "plotly_figure": {},
+                "plotly_figure_dict": {},
+                "plot_attempts": 0,
+                "plot_errors": []
             }
 
-            final_state = st.session_state.chain.invoke(initial_state)
+            final_state = st.session_state.graph.invoke(initial_state)
 
             # Gestisci errore
-            if final_state.get("error"):
-                response = f"❌ Si è verificato un errore:\n\n{final_state['error']}"
+            if final_state.get("error") and final_state.get("error") != "no":
+                response = f"Si e verificato un errore durante l'analisi"
                 st.error(response)
                 st.session_state.messages.append({
                     "role": "assistant",
@@ -77,23 +78,28 @@ if prompt := st.chat_input("Es: C'è correlazione tra risvegli e frequenza cardi
                 })
 
             else:
-                # Mostra risposta
-                response = final_state.get("final_response", "Analisi completata")
+                # Costruisci la risposta basata sui risultati
+                code_response = final_state.get("code_response", {})
+                statistical_method = final_state.get("statistical_method", {})
+
+                response_parts = []
+
+                # Aggiungi l'obiettivo dell'analisi
+                if statistical_method.get("analysis_goal"):
+                    response_parts.append(f"**Analisi:** {statistical_method['analysis_goal']}")
+
+                # Aggiungi i risultati statistici
+                response = "\n".join(response_parts) if response_parts else "Analisi completata"
                 st.markdown(response)
 
                 # Mostra grafico se presente
-                if final_state.get("vega_spec"):
-                    vega_spec = final_state["vega_spec"]
-
-                    # Estrai i dati dalla spec
-                    chart_data = vega_spec.get("data", {}).get("values", [])
-
-                    # Visualizza con Streamlit
-                    st.vega_lite_chart(
-                        data=chart_data,
-                        spec=vega_spec,
-                        use_container_width=True
-                    )
+                plotly_figure_dict = final_state.get("plotly_figure_dict")
+                if plotly_figure_dict:
+                    try:
+                        fig = go.Figure(plotly_figure_dict)
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception as e:
+                        st.warning(f"Errore nella visualizzazione del grafico: {e}")
 
                 # Salva in session state
                 message_data = {
@@ -101,26 +107,26 @@ if prompt := st.chat_input("Es: C'è correlazione tra risvegli e frequenza cardi
                     "content": response
                 }
 
-                if final_state.get("vega_spec"):
-                    message_data["vega_spec"] = final_state["vega_spec"]
+                if plotly_figure_dict:
+                    message_data["plotly_figure"] = plotly_figure_dict
 
                 st.session_state.messages.append(message_data)
 
 # Sidebar con info
 with st.sidebar:
-    st.header("ℹ️ Informazioni")
+    st.header("Informazioni")
     st.markdown("""
     **Esempi di domande:**
-    - C'è correlazione tra risvegli e frequenza cardiaca?
-    - Qual è la media del sonno REM negli ultimi 7 giorni?
+    - C'e correlazione tra risvegli e frequenza cardiaca?
+    - Qual e la media del sonno REM negli ultimi 7 giorni?
     - Mostra l'andamento del sonno profondo
     - Confronta il numero di risvegli con il tempo totale di sonno
     """)
 
     st.markdown("---")
-    st.caption(f"💬 Messaggi nella chat: {len(st.session_state.messages)}")
+    st.caption(f"Messaggi nella chat: {len(st.session_state.messages)}")
 
     # Pulsante per pulire la chat
-    if st.button("🗑️ Pulisci chat"):
+    if st.button("Pulisci chat"):
         st.session_state.messages = []
         st.rerun()

@@ -43,6 +43,10 @@ class StatisticalMethodSelection(BaseModel):
     expected_outputs: List[str] = Field(
         description="Lista degli output attesi dall'analisi"
     )
+    visualization_type: str = Field(
+        description="Se necessario, descrivi brevemente che tipo di visualizzazione plotly è necessaria, NO GRAPH altrimenti"
+    )
+
 class State(TypedDict):
     """State che mantiene lo stato della conversazione attraverso i nodi"""
     query: str
@@ -56,6 +60,7 @@ class State(TypedDict):
     generation: str
     iterations: int
     plotly_figure: dict
+    plotly_figure_dict:dict
     plot_attempts: int
     plot_errors: list
     code_response: str
@@ -200,12 +205,14 @@ CONSIDERAZIONI:
 3. Qual è il tipo di analisi più appropriato? (descrittiva, correlazione, confronto, trend, proporzioni, ecc.)
 4. Quali metriche statistiche sono necessarie?
 
+
 ISTRUZIONI:
 1. Identifica l'obiettivo principale della query
 2. Determina quale approccio statistico risponde meglio alla domanda
 3. Identifica le variabili specifiche da analizzare (usa i nomi esatti delle colonne disponibili)
 4. Specifica il metodo statistico da applicare più opportuno
 5. Indica quali metriche e output calcolare
+6. Se necessario, descrivi brevemente che tipo di visualizzazione plotly è necessaria, NO GRAPH altrimenti
 
 IMPORTANTE: Usa SOLO i nomi delle colonne presenti nei dati disponibili."""
 
@@ -229,9 +236,7 @@ Analizza la query e determina il metodo statistico più appropriato."""
         method_dict = method_selection.model_dump()
 
         print(method_dict)
-        print(f"✓ Obiettivo analisi: {method_dict['analysis_goal']}")
-        print(f"  Tipo analisi: {method_dict['analysis_type']}")
-        print(f"  Variabili: {method_dict['variables']}")
+
 
         return {
             **state,
@@ -444,7 +449,6 @@ def plot_generator(state: State) -> State:
     """
     print("\n[NODE PLOT] Generazione grafico Plotly...")
 
-    # Prepara i dati per il prompt
     code_result = state.get("code_response", {})
     statistical_method = state["statistical_method"]
     query_user = state.get("query")
@@ -453,7 +457,7 @@ def plot_generator(state: State) -> State:
     error = state.get("error", "")
     available_dataframes = list(state["raw_data"].keys())
 
-    # Ottieni informazioni sulle colonne disponibili
+
     available_columns_by_df = domain_registry.get_available_columns_for_domains(state["domains_detected"])
 
     if error == "yes":
@@ -462,22 +466,18 @@ def plot_generator(state: State) -> State:
                 content="Now, try again. Invoke the code tool to structure the output with a prefix, imports, and code block:")
         ]
 
-    # Formatta le informazioni in modo chiaro
+
     analysis_type = statistical_method.get('analysis_type', 'unknown')
     variables = statistical_method.get('variables', [])
 
-    # Converti i risultati in stringa senza parentesi graffe
-    result_lines = []
-    for key, value in code_result.items():
-        result_lines.append(f"  - {key}: {value}")
-    result_summary = "\n".join(result_lines)
 
-    # Formatta le colonne disponibili
+
+    #INUTILMENTE COMPLICATO; ELIMINABILE
     columns_info = chr(10).join(
         f"  • {df_name}: {', '.join(f'{col} ({dtype})' for col, dtype in columns.items())}"
         for df_name, columns in available_columns_by_df.items()
     )
-
+    visual_type = state.get("statistical_method", {}).get("visualization_type", "unknown")
     context = f"""OBIETTIVO: Crea un grafico Plotly che visualizzi i risultati dell'analisi statistica.
 
 DOMANDA UTENTE: "{query_user}"
@@ -486,7 +486,7 @@ DATI ANALISI COMPLETATA:
 - Tipo di analisi: {analysis_type}
 - Variabili analizzate: {', '.join(variables)}
 - Risultati statistici ottenuti:
-{result_summary}
+{code_result}
 
 DATAFRAME DISPONIBILI:
 {', '.join(available_dataframes)}
@@ -495,12 +495,8 @@ IMPORTANTE: I DataFrames contengono i seguenti campi:
 {columns_info}
 
 REQUISITI DEL GRAFICO:
-1. Scegli il tipo di grafico più appropriato per l'analisi {analysis_type}:
-   - correlation: scatter plot con linea di tendenza
-   - comparison: bar chart o box plot
-   - trend: line chart
-   - proportion: pie chart o bar chart
-   - descriptive: histogram o box plot
+1. {visual_type}
+
 
 2. Il grafico DEVE:
    - Visualizzare le variabili: {', '.join(variables)}
@@ -546,7 +542,7 @@ NOTA CRITICA:
         content=f"{plot_generated.description}\n\nImports:\n{plot_generated.imports}\n\nCode:\n{plot_generated.code}"
     )
 
-    iterations = iterations + 1
+
 
     plot_attempts = state.get("plot_attempts", 0) + 1
 
@@ -554,8 +550,7 @@ NOTA CRITICA:
         **state,
         "plotly_figure": plot_generated,
         "messages": messages + [assistant_message],
-        "iterations": iterations,
-        "plot_attempts": plot_attempts
+        "plot_attempts": plot_attempts,  # Usa plot_attempts invece di iterations
     }
 
 
@@ -563,19 +558,18 @@ def check_plot_code(state: State) -> State:
     """
     Nodo: Verifica l'esecuzione del codice del grafico.
     """
-    print("--Checking plot code solution--")
+    print("---CHECKING PLOT CODE---")
 
     messages = state.get("messages", [])
     plot_solution = state["plotly_figure"]
-    iterations = state.get("iterations", 0)
     raw_data = state.get("raw_data", {})
     imports = plot_solution.imports
     code = plot_solution.code
 
     try:
-        print("---CHECK PLOT IMPORTS---")
-        python_repl.run(imports)  # Usa lo stesso REPL dell'analisi
+        python_repl.run(imports)
     except Exception as e:
+        print(f"---PLOT IMPORT FAILED: {e}---")
         error_message = HumanMessage(content=f"Il codice di import del grafico ha fallito: {e}")
         return {
             **state,
@@ -586,7 +580,6 @@ def check_plot_code(state: State) -> State:
     try:
         print("---CHECK PLOT CODE BLOCK---")
 
-        # Carica i DataFrame nello stesso ambiente dell'analisi
         for key, records in raw_data.items():
             import pandas as pd
             df = pd.DataFrame(records)
@@ -595,35 +588,18 @@ def check_plot_code(state: State) -> State:
 
         print(f"Executing plot code:\n{code}")
 
-        # Esegui il codice del grafico
         python_repl.run(code)
 
-        # Recupera il risultato - IMPORTANTE: usa result_graph come specificato
         result_graph = python_repl.locals.get('result_graph')
 
         if result_graph is None:
-            # Prova a recuperare dalla variabile globale
             result_graph = python_repl.globals.get('result_graph')
 
-        print(f"Plot result: {result_graph}")
-        # after you have result_graph
-        import plotly.graph_objects as go
-        from pathlib import Path
-
-        # ricostruisci la figura da dict
-        fig = go.Figure(result_graph)
-
-        # genera HTML standalone (usa CDN per plotly.js, riduce la dimensione del file)
-        html = fig.to_html(full_html=True, include_plotlyjs='cdn')
-
-        project_root = Path(__file__).parent  # cartella dove si trova il file Python
-        out_path = project_root / "plot_debug.html"
-        out_path.write_text(html, encoding='utf-8')
-
-        print(f"Saved debug HTML to: {out_path}")  # log nel terminale
+        print(f"Plot result type: {type(result_graph)}")
 
         # Verifica che result_graph sia un dizionario valido
         if result_graph is None:
+            print("---PLOT CODE FAILED: result_graph is None---")
             error_message = HumanMessage(
                 content="Il codice del grafico non ha creato la variabile 'result_graph'. Assicurati di usare: result_graph = fig.to_dict()"
             )
@@ -636,6 +612,7 @@ def check_plot_code(state: State) -> State:
         # Verifica la struttura base del dizionario Plotly
         required_keys = ['data', 'layout']
         if not all(key in result_graph for key in required_keys):
+            print(f"---PLOT CODE FAILED: Missing keys. Has {list(result_graph.keys())}---")
             error_message = HumanMessage(
                 content=f"Il grafico non ha la struttura Plotly corretta. Dovrebbe contenere: {required_keys}. Contiene: {list(result_graph.keys())}"
             )
@@ -661,47 +638,42 @@ def check_plot_code(state: State) -> State:
             "error": "yes"
         }
 
+    # Salva l'HTML solo in caso di successo
     print("---PLOT CODE CHECK: SUCCESS---")
+
+    try:
+        import plotly.graph_objects as go
+        from pathlib import Path
+
+        fig = go.Figure(result_graph)
+        html = fig.to_html(full_html=True, include_plotlyjs='cdn')
+
+        project_root = Path(__file__).parent
+        out_path = project_root / "plot_debug.html"
+        out_path.write_text(html, encoding='utf-8')
+
+        print(f"Saved debug HTML to: {out_path}")
+    except Exception as e:
+        print(f"Warning: Could not save HTML file: {e}")
+
     success_message = AIMessage(content="Grafico generato con successo!")
 
-    # NON sovrascrivere code_response - crea una nuova chiave per il grafico
     return {
         **state,
-        "iterations": 0,
         "messages": messages + [success_message],
-        "error": "no",
-        "plotly_figure_dict": result_graph,  # Nuova chiave per il grafico
-        # Mantieni il risultato dell'analisi statistica originale
-        "code_response": state.get("code_response")
+        "error": "no",  # ← Questo è CRITICO
+        "plotly_figure_dict": result_graph
     }
 
-def decide_to_finish_plot(state: State) -> Literal["plot_generator", "end"]:
-    """
-    Decide se continuare con il plot o terminare.
-    """
-    error = state.get("error", "")
-    iterations = state.get("iterations", 0)
-    plot_attempts = state.get("plot_attempts", 0)
 
-    if error == "no":
-        print("---PLOT DECISION: SUCCESS - FINISH---")
-        return "end"
-    elif iterations >= max_iterations or plot_attempts >= 2:
-        print(f"---PLOT DECISION: MAX ATTEMPTS REACHED - FINISH---")
-        return "end"
-    else:
-        print(f"---PLOT DECISION: RETRY PLOT (attempt {plot_attempts + 1})---")
-        return "plot_generator"
 # ==================== CONDITIONAL EDGES ====================
 def check_error_extract(state: State) -> Literal["select_method", "end"]:
     """Controlla se ci sono errori dopo l'estrazione dati"""
     return "end" if state.get("error") else "select_method"
 
-
 def check_error_method(state: State) -> Literal["analyze", "end"]:
     """Controlla se ci sono errori dopo la selezione del metodo"""
     return "end" if state.get("error") else "analyze"
-
 
 def decide_to_finish(state: State) -> Literal["analyze", "end"]:
     """
@@ -723,6 +695,26 @@ def decide_to_finish(state: State) -> Literal["analyze", "end"]:
         print(f"---DECISION: RETRY ANALYZE (attempt {iterations + 1}/{max_iterations})---")
         return "analyze"
 
+def decide_to_finish_plot(state: State) -> Literal["plot_generator", "end"]:
+    """
+    Decide se continuare con il plot o terminare.
+    """
+    error = state.get("error", "")
+    plot_attempts = state.get("plot_attempts", 0)
+
+    print(f"\n---PLOT DECISION CHECK---")
+    print(f"Error status: {error}")
+    print(f"Plot attempts: {plot_attempts}")
+
+    if error == "no":
+        print("---PLOT DECISION: SUCCESS - FINISH---")
+        return "end"
+    elif plot_attempts >= 3:  # Aumentato a 3 tentativi
+        print(f"---PLOT DECISION: MAX ATTEMPTS ({plot_attempts}) REACHED - FINISH---")
+        return "end"
+    else:
+        print(f"---PLOT DECISION: RETRY PLOT (attempt {plot_attempts + 1}/3)---")
+        return "plot_generator"
 
 # ==================== GRAPH CREATION ====================
 def create_sleep_analysis_graph() -> CompiledStateGraph:
@@ -798,7 +790,7 @@ if __name__ == "__main__":
     app = create_sleep_analysis_graph()
 
     result = app.invoke({
-        "query": "Come sta utilizzando la cucina il soggeto 2 negli ultimi 10 giorni?",
+        "query": "Mostrami il trend dei risvegli negli ultimi 20 giorni per il soggetto 2 negli ultimi 20 giorni",
         "messages": [],
         "iterations": 0
     })
