@@ -1,9 +1,6 @@
-from typing import Dict, Optional, List, Any, Tuple
+from typing import Dict, Optional, List
 
-from datacleaner import DataCleaner
-from domain_configs import SLEEP_CONFIG
-from registry.DomainConfig import DomainConfig, DataExtractor
-import pandas as pd
+from registry.DomainConfig import DomainConfig
 
 
 class DomainRegistry:

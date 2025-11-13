@@ -8,44 +8,22 @@ from langchain_ollama import ChatOllama
 
 from tool import get_sleep_data, get_kitchen_data
 
-load_dotenv()
-ollama_user=os.getenv("OLLAMA_USER")
-ollama_pwd=os.getenv("OLLAMA_PWD")
-credentials = f"{ollama_user}:{ollama_pwd}"
-base64_credentials = base64.b64encode(credentials.encode()).decode()
-
-@tool
-def validate_user(user_id: int, addresses: List[str]) -> bool:
-    """Validate user using historical addresses.
-
-    Args:
-        user_id (int): the user ID.
-        addresses (List[str]): Previous addresses as a list of strings.
-    """
-    return True
-
-
+from langsmith import Client
 
 
 
 if __name__ == "__main__":
-    llm = ChatOllama(
-        model='qwen3:32b',
-        base_url='https://lovelace.ewlab.di.unimi.it/ollama',
-        reasoning=False,
-        validate_model_on_init=True,
-        client_kwargs={
-            "headers": {
-                "Authorization": f"Basic {base64_credentials}"
-            }
-        }
-    ).bind_tools([get_sleep_data, get_kitchen_data])
-    result = llm.invoke(
-        "come ha dormtio il soggetto 2 negli ultimi 10 giorni"
-    )
-    print(result)
+    client = Client()
 
+    run_id = ""
+    result = client.list_runs(project_id="16a937f5-deab-4612-9902-fc67c7506aaa")
 
+    for run in result:
+        if run.status == "pending":
+            print(f"Run ID: {run.id}")
+            print(f"Name: {run.name}")
+            print(f"Status: {run.status}")
+            print(f"Start time: {run.start_time}")
+            print("-" * 50)
+            client.update_run(run_id=run.id, status="aborted")
 
-    if isinstance(result, AIMessage) and result.tool_calls:
-        print(result.tool_calls)

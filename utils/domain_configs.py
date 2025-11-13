@@ -1,5 +1,5 @@
 # domain_configs.py
-from datacleaner import DomainConfig
+from utils.datacleaner import DomainConfig
 
 
 SLEEP_CONFIG = DomainConfig(

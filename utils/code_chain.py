@@ -1,8 +1,7 @@
 from pydantic import BaseModel, Field
-from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import HumanMessage, AIMessage
-from typing import Optional, List, Union
-from settings import llm_code
+from typing import Optional, List
+from utils.settings import client_oll as llm_code
 
 
 class Code(BaseModel):
@@ -26,7 +25,7 @@ Response schema:
 {{
   "description": "brief code explanation",
   "imports": "import statements only",
-  "code": "implementation code that stores final result in variable '{result_var}' {result_format}"
+  "code": "implementation code that stores final result '{result_var}' {result_format}"
 }}
 
 Rules:
@@ -128,9 +127,6 @@ def create_code_chain(
             | structured_llm
             | validate_output
     )
-    png_bytes = main_chain.get_graph().draw_mermaid_png()
-    with open("main_chain.png", "wb") as f:
-        f.write(png_bytes)
 
     # Chain con retry
     retry_chain = handle_retry | main_chain
@@ -141,7 +137,7 @@ def create_code_chain(
         exception_key="error"
     )
     png_bytes_1 = chain_with_retries.get_graph().draw_mermaid_png()
-    with open("chain_with_retries.png", "wb") as f:
+    with open("../chain_with_retries.png", "wb") as f:
         f.write(png_bytes_1)
     # Aggiungi estrazione finale
     return chain_with_retries | extract_parsed

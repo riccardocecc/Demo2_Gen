@@ -5,14 +5,14 @@ import os
 from pathlib import Path
 from google.api_core import exceptions
 import time
-
+from langchain_experimental.utilities.python import PythonREPL
 from langchain_ollama import ChatOllama
 
 # Carica le variabili dal file .env
 load_dotenv()
 
 from langchain_google_genai import ChatGoogleGenerativeAI
-
+python_repl = PythonREPL()
 # Recupera la chiave dall'ambiente
 google_api_key = os.getenv("GOOGLE_API")
 mistral_api = os.getenv("MISTRAL")
@@ -47,7 +47,17 @@ llm_correlation  = ChatGoogleGenerativeAI(
     timeout=60.0,
     max_retries=0
 )
+client_oll = ChatOllama(
+    model='qwen3:32b',
+    base_url='https://lovelace.ewlab.di.unimi.it/ollama',
+    reasoning=False,
+    client_kwargs={
+            "headers": {
+                "Authorization": f"Basic {base64_credentials}"
+        }
+    }
 
+)
 llm_agents = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
     google_api_key=google_api_key,
@@ -132,7 +142,7 @@ def invoke_with_structured_output(llm, router,messages, max_retries=3):
                 raise
 
 
-PROJECT_ROOT = Path(__file__).parent
+PROJECT_ROOT = Path(__file__).parent.parent
 
 DATA_DIR = PROJECT_ROOT / "data"
 

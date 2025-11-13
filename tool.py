@@ -1,11 +1,9 @@
-from datetime import timedelta
-from typing import Annotated, TypedDict
+from typing import Annotated
 
-import pandas as pd
 from langchain_core.tools import tool
 from pydantic import BaseModel
 
-from settings import SLEEP_DATA_PATH
+from utils.settings import SLEEP_DATA_PATH
 from type import SleepDataResult, ErrorResult, KitchenDataResult
 
 class ToolInput(BaseModel):
@@ -93,12 +91,11 @@ def get_sleep_data(
 
 
 from datetime import timedelta
-from typing import Annotated, TypedDict
 
 import pandas as pd
 from langchain_core.tools import tool
 
-from settings import KITCHEN_DATA_PATH  # Assicurati di aggiungere questo in settings.py
+from utils.settings import KITCHEN_DATA_PATH  # Assicurati di aggiungere questo in settings.py
 
 
 
