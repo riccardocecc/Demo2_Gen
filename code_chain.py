@@ -128,6 +128,9 @@ def create_code_chain(
             | structured_llm
             | validate_output
     )
+    png_bytes = main_chain.get_graph().draw_mermaid_png()
+    with open("main_chain.png", "wb") as f:
+        f.write(png_bytes)
 
     # Chain con retry
     retry_chain = handle_retry | main_chain
@@ -137,7 +140,9 @@ def create_code_chain(
         fallbacks=[retry_chain] * max_retries,
         exception_key="error"
     )
-
+    png_bytes_1 = chain_with_retries.get_graph().draw_mermaid_png()
+    with open("chain_with_retries.png", "wb") as f:
+        f.write(png_bytes_1)
     # Aggiungi estrazione finale
     return chain_with_retries | extract_parsed
 

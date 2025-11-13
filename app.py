@@ -117,9 +117,9 @@ with st.sidebar:
     st.header("Informazioni")
     st.markdown("""
     **Esempi di domande:**
-    - C'e correlazione tra risvegli e frequenza cardiaca?
-    - Qual e la media del sonno REM negli ultimi 7 giorni?
-    - Mostra l'andamento del sonno profondo
+    - Mostrami il trend dei risvegli notturni negli ultimi 20 giorni per il soggetto 2
+    - C'è correlazione tra il numero di risvegli e l'utilizzo della cucina negli ultimi 20 giorni per il soggetto 2?
+    - In quali momenti della giornata il soggetto 2 cucina di più?
     - Confronta il numero di risvegli con il tempo totale di sonno
     """)
 
